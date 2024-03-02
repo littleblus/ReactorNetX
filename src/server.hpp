@@ -2,15 +2,12 @@
 #include <stdexcept>
 
 class Buffer {
-public:
-    Buffer(std::size_t size = 1024) : _buffer(size), _read_idx(0), _write_idx(0) {}
+private:
 
     const char* ReadPos() const { return &_buffer[_read_idx]; }
     char* WritePos() { return &_buffer[_write_idx]; }
     std::size_t FrontSize() const { return _read_idx; }
     std::size_t BackSize() const { return _buffer.size() - _write_idx; }
-    std::size_t ReadableSize() const { return _write_idx - _read_idx; }
-    std::size_t WritableSize() const { return BackSize() + FrontSize(); }
 
     void MoveReadIdx(std::size_t len) {
         if (_read_idx + len > _write_idx) throw std::out_of_range("move read idx out of range");
@@ -38,10 +35,16 @@ public:
     }
     char* FindCRLF() {
         for (auto p = ReadPos(); p < WritePos(); p++) {
-            if (*p == 'n') return const_cast<char*>(p);
+            if (*p == '\n') return const_cast<char*>(p);
         }
         return nullptr;
     }
+public:
+    explicit Buffer(std::size_t size = 1024) : _buffer(size), _read_idx(0), _write_idx(0) {}
+    Buffer(const Buffer& buf) : Buffer() { Write(buf); } // 拷贝构造函数（委托构造）
+
+    std::size_t ReadableSize() const { return _write_idx - _read_idx; }
+    std::size_t WritableSize() const { return BackSize() + FrontSize(); }
 
     void Read(void* buf, std::size_t len, bool pop = false) {
         if (len > ReadableSize()) return;
