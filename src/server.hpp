@@ -1,5 +1,14 @@
+#pragma once
+
+#include "log.hpp"
 #include <vector>
 #include <stdexcept>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <fcntl.h>
 
 class Buffer {
 private:
@@ -74,4 +83,138 @@ private:
     std::vector<char> _buffer;
     std::size_t _read_idx;
     std::size_t _write_idx;
+};
+
+Log lg(Onefile);
+
+class Socket {
+public:
+    Socket() : _sockfd(-1) {}
+    explicit Socket(int fd) : _sockfd(fd) {}
+    ~Socket() { Close(); }
+    Socket(const Socket&) = delete;
+    Socket& operator=(const Socket&) = delete;
+
+    // 获取套接字描述符
+    int GetFd() const { return _sockfd; }
+    // 创建套接字
+    bool Create() {
+        _sockfd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (_sockfd == -1) {
+            lg(Error, "create socket failed");
+            return false;
+        }
+        return true;
+    }
+    // 绑定地址
+    bool Bind(const std::string& ip, uint16_t port) {
+        struct sockaddr_in addr;
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(port);
+        addr.sin_addr.s_addr = inet_addr(ip.c_str());
+        socklen_t len = sizeof(addr);
+        if (bind(_sockfd, reinterpret_cast<struct sockaddr*>(&addr), len) == -1) {
+            lg(Error, "bind address %s:%d failed", ip.c_str(), port);
+            return false;
+        }
+        return true;
+    }
+    // 监听
+    bool Listen(int backlog = 1024) {
+        if (listen(_sockfd, backlog) == -1) {
+            lg(Error, "listen failed");
+            return false;
+        }
+        return true;
+    }
+    // 客户发起连接
+    bool Connect(const std::string& ip, uint16_t port) {
+        struct sockaddr_in addr;
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(port);
+        addr.sin_addr.s_addr = inet_addr(ip.c_str());
+        socklen_t len = sizeof(addr);
+        if (connect(_sockfd, reinterpret_cast<struct sockaddr*>(&addr), len) == -1) {
+            lg(Error, "connect server %s:%d failed", ip.c_str(), port);
+            return false;
+        }
+        return true;
+    }
+    // 获取新连接
+    int Accept() {
+        int newfd = accept(_sockfd, nullptr, nullptr);
+        if (newfd == -1) lg(Error, "accept failed");
+        return newfd;
+    }
+    // 接收数据
+    ssize_t Recv(void* buf, std::size_t len, int flag = 0) {
+        ssize_t ret = recv(_sockfd, buf, len, flag);
+        if (ret == -1) {
+            // EAGAIN: 没有数据可读
+            // EINTR:  被信号中断
+            if (errno == EAGAIN || errno == EINTR) return 0;
+            else lg(Error, "recv failed");
+        }
+        return ret;
+    }
+    // 发送数据
+    ssize_t Send(const void* buf, std::size_t len, int flag = 0) {
+        ssize_t ret = send(_sockfd, buf, len, flag);
+        if (ret == -1) {
+            // EAGAIN: 没有数据可写
+            // EINTR:  被信号中断
+            if (errno == EAGAIN || errno == EINTR) return 0;
+            else lg(Error, "send failed");
+        }
+        return ret;
+    }
+    // 关闭套接字
+    void Close() {
+        if (_sockfd != -1) {
+            close(_sockfd);
+            _sockfd = -1;
+        }
+    }
+    // 创建服务端连接
+    bool CreateServer(uint16_t port, bool block = true, const std::string& ip = "0.0.0.0", int backlog = 1024) {
+        if (!Create()) return false;
+        if (!Bind(ip, port)) return false;
+        if (!Listen(backlog)) return false;
+        if (block == false) NonBlock();
+        ReuseAddr();
+        return true;
+    }
+    // 创建客户端连接
+    bool CreateClient(uint16_t port, const std::string& ip) {
+        if (!Create()) return false;
+        if (!Connect(ip, port)) return false;
+        NonBlock();
+        return true;
+    }
+    // 设置地址、端口复用
+    void ReuseAddr() {
+        int opt = 1; // 1: 开启 0: 关闭
+        if (setsockopt(_sockfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) == -1) {
+            lg(Error, "set reuse address failed");
+        }
+        opt = 1;
+        if (setsockopt(_sockfd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt)) == -1) {
+            lg(Error, "set reuse port failed");
+        }
+    }
+    // 设置非阻塞
+    void NonBlock() {
+        // 获取当前标志
+        int opt = fcntl(_sockfd, F_GETFL, 0);
+        if (opt == -1) {
+            lg(Error, "get socket flag failed");
+            return;
+        }
+        // 增加非阻塞标志
+        if (fcntl(_sockfd, F_SETFL, opt | O_NONBLOCK) == -1) {
+            lg(Error, "set nonblock failed");
+        }
+    }
+private:
+    int _sockfd;
 };
