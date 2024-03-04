@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.27)
 project(timewheel)
 
-add_executable(time_wheel timewheel.cpp)
+add_executable(server src/tcpSrv.cpp)
+add_executable(client src/tcpCli.cpp)
 
-target_compile_features(time_wheel PUBLIC cxx_std_17)
+target_compile_features(server PUBLIC cxx_std_17)
+target_compile_features(client PUBLIC cxx_std_17)

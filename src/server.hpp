@@ -3,16 +3,22 @@
 #include "log.hpp"
 #include <vector>
 #include <stdexcept>
+#include <functional>
+#include <unordered_map>
+#include <cstring>
+
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <sys/epoll.h>
+
+Log lg(Onefile);
 
 class Buffer {
 private:
-
     const char* ReadPos() const { return &_buffer[_read_idx]; }
     char* WritePos() { return &_buffer[_write_idx]; }
     std::size_t FrontSize() const { return _read_idx; }
@@ -84,8 +90,6 @@ private:
     std::size_t _read_idx;
     std::size_t _write_idx;
 };
-
-Log lg(Onefile);
 
 class Socket {
 public:
@@ -218,3 +222,161 @@ public:
 private:
     int _sockfd;
 };
+
+class Poller;
+// 事件循环，对fd进行监控
+class Channel {
+public:
+    using callback_t = std::function<void()>;
+    Channel(int fd, Poller* poller) : _fd(fd), _events(0), _revents(0), _poller(poller) {};
+
+    void SetReadCallback(callback_t cb) { _read_cb = cb; }
+    void SetWriteCallback(callback_t cb) { _write_cb = cb; }
+    void SetErrorCallback(callback_t cb) { _error_cb = cb; }
+    void SetCloseCallback(callback_t cb) { _close_cb = cb; }
+    void SetEventCallback(callback_t cb) { _event_cb = cb; }
+    void SetRevents(int revents) { _revents = revents; }
+
+    int GetFd() const { return _fd; }
+    int GetEvents() const { return _events; }
+    // 是否监控读事件
+    bool Readable() const { return _events & EPOLLIN; }
+    // 是否监控写事件
+    bool Writable() const { return _events & EPOLLOUT; }
+    // 启动读事件监控
+    void EnableRead() {
+        _events |= EPOLLIN;
+        Update();
+    }
+    // 禁用读事件监控
+    void DisableRead() {
+        _events &= ~EPOLLIN;
+        Update();
+    }
+    // 启动写事件监控
+    void EnableWrite() {
+        _events |= EPOLLOUT;
+        Update();
+    }
+    // 禁用写事件监控
+    void DisableWrite() {
+        _events &= ~EPOLLOUT;
+        Update();
+    }
+    // 禁用所有事件监控
+    void DisableAll() {
+        _events = 0;
+        Update();
+    }
+    // 更新监控
+    void Update();
+    // 移除监控
+    void Remove();
+    // 事件处理
+    void HandleEvent() {
+        // EPOLLIN:  有数据可读
+        // EPOLLPRI: 有紧急数据可读
+        // EPOLLOUT: 有数据可写
+        // EPOLLERR: 错误
+        // EPOLLHUP: 对端关闭
+        // EPOLLRDHUP: 对端关闭连接
+        if ((_revents & EPOLLIN) || (_revents & EPOLLPRI) || (_revents & EPOLLRDHUP)) {
+            if (_read_cb) _read_cb();
+        }
+        if (_revents & EPOLLOUT) {
+            if (_write_cb) _write_cb();
+        }
+        if (_revents & EPOLLERR) {
+            if (_error_cb) _error_cb();
+        }
+        if (_event_cb) _event_cb(); // 注意次序
+        if (_revents & EPOLLHUP) {
+            if (_close_cb) _close_cb();
+        }
+    }
+private:
+    int _fd;
+    int _events; // 需要监控的事件
+    int _revents; // 实际触发的事件
+    Poller* _poller;
+
+    callback_t _read_cb;
+    callback_t _write_cb;
+    callback_t _error_cb;
+    callback_t _close_cb;
+    callback_t _event_cb; // 任意事件回调
+};
+
+class Poller {
+private:
+    void EpollOp(int op, Channel* ch) {
+        int fd = ch->GetFd();
+        struct epoll_event ev;
+        ev.data.fd = fd;
+        ev.events = ch->GetEvents();
+        int ret = epoll_ctl(_epollfd, op, fd, &ev);
+        if (ret == -1) {
+            lg(Error, "epoll op failed");
+            throw std::runtime_error("epoll op failed");
+        }
+    }
+    bool HasChannel(int fd) const { return _channels.find(fd) != _channels.end(); }
+public:
+    // 创建epoll
+    // EPOLL_CLOEXEC: 进程执行exec时关闭文件描述符
+    Poller() : _epollfd(epoll_create1(EPOLL_CLOEXEC)), _events(1024) {
+        if (_epollfd == -1) {
+            lg(Error, "create epoll failed");
+            throw std::runtime_error("create epoll failed");
+        }
+    }
+
+    void Update(Channel* ch) {
+        if (HasChannel(ch->GetFd())) {
+            EpollOp(EPOLL_CTL_MOD, ch);
+        }
+        else {
+            EpollOp(EPOLL_CTL_ADD, ch);
+            _channels[ch->GetFd()] = ch;
+        }
+    }
+
+    void Remove(Channel* ch) {
+        auto it = _channels.find(ch->GetFd());
+        if (it != _channels.end()) {
+            EpollOp(EPOLL_CTL_DEL, ch);
+            _channels.erase(it);
+        }
+    }
+
+    // 开始监控
+    void Poll(std::vector<Channel>& active, int timeout = -1) {
+        int n = epoll_wait(_epollfd, _events.data(), _events.size(), timeout);
+        if (n == -1) {
+            if (errno == EINTR) {
+                lg(Warning, "epoll wait interrupted");
+                return;
+            }
+            else {
+                lg(Error, "epoll wait failed: %s", strerror(errno));
+                throw std::runtime_error("epoll wait failed");
+            }
+        }
+        for (int i = 0; i < n; i++) {
+            auto ch = _channels.find(_events[i].data.fd);
+            if (ch == _channels.end()) {
+                lg(Error, "channel not found");
+                throw std::runtime_error("channel not found");
+            }
+            ch->second->SetRevents(_events[i].events);
+            active.push_back(*ch->second);
+        }
+    }
+private:
+    int _epollfd;
+    std::vector<struct epoll_event> _events;
+    std::unordered_map<int, Channel*> _channels;
+};
+
+void Channel::Update() { _poller->Update(this); }
+void Channel::Remove() { _poller->Remove(this); }
