@@ -280,6 +280,7 @@ public:
         // EPOLLERR: 错误
         // EPOLLHUP: 对端关闭
         // EPOLLRDHUP: 对端关闭连接
+        if (_event_cb) _event_cb(); // 注意次序
         if ((_revents & EPOLLIN) || (_revents & EPOLLPRI) || (_revents & EPOLLRDHUP)) {
             if (_read_cb) _read_cb();
         }
@@ -289,9 +290,8 @@ public:
         if (_revents & EPOLLERR) {
             if (_error_cb) _error_cb();
         }
-        if (_event_cb) _event_cb(); // 注意次序
         if (_revents & EPOLLHUP) {
-            if (_close_cb) _close_cb();
+            if (_close_cb) _close_cb(); // 注意其他回调不要close, 否则会重复close
         }
     }
 private:
@@ -350,7 +350,7 @@ public:
     }
 
     // 开始监控
-    void Poll(std::vector<Channel>& active, int timeout = -1) {
+    void Poll(std::vector<Channel*>& active, int timeout = -1) {
         int n = epoll_wait(_epollfd, _events.data(), _events.size(), timeout);
         if (n == -1) {
             if (errno == EINTR) {
@@ -369,7 +369,7 @@ public:
                 throw std::runtime_error("channel not found");
             }
             ch->second->SetRevents(_events[i].events);
-            active.push_back(*ch->second);
+            active.push_back(ch->second);
         }
     }
 private:
