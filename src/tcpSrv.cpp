@@ -32,12 +32,12 @@ void HandleEvent(Channel* channel) {
     std::cout << "Event: " << channel->GetFd() << std::endl;
 }
 
-void Accepter(Poller* poller, Socket* lst_sock) {
+void Accepter(EventLoop* loop, Socket* lst_sock) {
     int fd = lst_sock->GetFd();
     int newfd = accept(fd, NULL, NULL);
     if (newfd < 0) return;
     // 为新连接设置回调函数
-    Channel* channel = new Channel(newfd, poller);
+    Channel* channel = new Channel(newfd, loop);
     channel->SetReadCallback(std::bind(HandleRead, channel));
     channel->SetWriteCallback(std::bind(HandleWrite, channel));
     channel->SetCloseCallback(std::bind(HandleClose, channel));
@@ -47,19 +47,15 @@ void Accepter(Poller* poller, Socket* lst_sock) {
 }
 
 int main() {
-    Poller poller;
+    EventLoop loop;
     Socket lst_sock;
     lst_sock.CreateServer(8888);
     // 为监听套接字设置回调函数
-    Channel channel(lst_sock.GetFd(), &poller);
-    channel.SetReadCallback(std::bind(Accepter, &poller, &lst_sock));
+    Channel channel(lst_sock.GetFd(), &loop);
+    channel.SetReadCallback(std::bind(Accepter, &loop, &lst_sock));
     channel.EnableRead();
     for (;;) {
-        std::vector<Channel*> actives;
-        poller.Poll(actives);
-        for (auto& channel : actives) {
-            channel->HandleEvent();
-        }
+        loop.Start();
     }
 
     return 0;

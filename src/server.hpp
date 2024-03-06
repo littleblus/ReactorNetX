@@ -394,7 +394,7 @@ public:
             lg(Fatal, "create eventfd failed");
             throw std::runtime_error("create eventfd failed");
         }
-        _eventch->SetReadCallback(std::bind(ReadEventfd, this));
+        _eventch->SetReadCallback(std::bind(&EventLoop::ReadEventfd, this));
         _eventch->EnableRead();
     }
     ~EventLoop() {
