@@ -28,8 +28,8 @@ void HandleError(Channel* channel) {
     lg(Warning, "Error channel: %d", channel->GetFd());
 }
 
-void HandleEvent(Channel* channel) {
-    std::cout << "Event: " << channel->GetFd() << std::endl;
+void HandleEvent(EventLoop* loop, uint64_t timerid) {
+    loop->RefreshAfter(timerid);
 }
 
 void Accepter(EventLoop* loop, Socket* lst_sock) {
@@ -38,11 +38,13 @@ void Accepter(EventLoop* loop, Socket* lst_sock) {
     if (newfd < 0) return;
     // 为新连接设置回调函数
     Channel* channel = new Channel(newfd, loop);
+    uint64_t timerid = rand() % 10000;
     channel->SetReadCallback(std::bind(HandleRead, channel));
     channel->SetWriteCallback(std::bind(HandleWrite, channel));
     channel->SetCloseCallback(std::bind(HandleClose, channel));
     channel->SetErrorCallback(std::bind(HandleError, channel));
-    channel->SetEventCallback(std::bind(HandleEvent, channel));
+    channel->SetEventCallback(std::bind(HandleEvent, loop, timerid));
+    loop->RunAfter(timerid, 10, std::bind(HandleClose, channel));
     channel->EnableRead();
 }
 
