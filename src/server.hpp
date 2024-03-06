@@ -6,6 +6,9 @@
 #include <functional>
 #include <unordered_map>
 #include <cstring>
+#include <queue>
+#include <mutex>
+#include <thread>
 
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -14,6 +17,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/epoll.h>
+#include <sys/eventfd.h>
 
 Log lg(Onefile);
 
@@ -223,12 +227,12 @@ private:
     int _sockfd;
 };
 
-class Poller;
+class EventLoop;
 // 事件循环，对fd进行监控
 class Channel {
 public:
     using callback_t = std::function<void()>;
-    Channel(int fd, Poller* poller) : _fd(fd), _events(0), _revents(0), _poller(poller) {};
+    Channel(int fd, EventLoop* loop) : _fd(fd), _events(0), _revents(0), _loop(loop) {};
 
     void SetReadCallback(callback_t cb) { _read_cb = cb; }
     void SetWriteCallback(callback_t cb) { _write_cb = cb; }
@@ -298,7 +302,7 @@ private:
     int _fd;
     int _events; // 需要监控的事件
     int _revents; // 实际触发的事件
-    Poller* _poller;
+    EventLoop* _loop;
 
     callback_t _read_cb;
     callback_t _write_cb;
@@ -378,5 +382,100 @@ private:
     std::unordered_map<int, Channel*> _channels;
 };
 
-void Channel::Update() { _poller->Update(this); }
-void Channel::Remove() { _poller->Remove(this); }
+class EventLoop {
+public:
+    using callback_t = std::function<void()>;
+
+    EventLoop()
+        : _eventfd(eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC))
+        , _tid(std::this_thread::get_id())
+        , _eventch(new Channel(_eventfd, this)) {
+        if (_eventfd == -1) {
+            lg(Fatal, "create eventfd failed");
+            throw std::runtime_error("create eventfd failed");
+        }
+        _eventch->SetReadCallback(std::bind(ReadEventfd, this));
+        _eventch->EnableRead();
+    }
+    ~EventLoop() {
+        delete _eventch;
+        close(_eventfd);
+    }
+
+    // 判断将要执行的任务是否在当前线程中, 是则执行, 否则放入队列中
+    void RunInLoop(const callback_t& cb) {
+        if (IsInLoopThread()) cb();
+        else QueueInLoop(cb);
+    }
+    // 添加事件监控
+    void UpdateEvent(Channel* ch) { _poller.Update(ch); }
+    // 移除事件监控
+    void RemoveEvent(Channel* ch) { _poller.Remove(ch); }
+
+    void Start() {
+        // 事件监控
+        std::vector<Channel*> _active;
+        _poller.Poll(_active);
+        // 事件处理
+        for (auto& ch : _active) {
+            ch->HandleEvent();
+        }
+        // 执行任务
+        RunPendingTasks();
+    }
+private:
+    void ReadEventfd() {
+        uint64_t res;
+        ssize_t n = read(_eventfd, &res, sizeof(res));
+        if (n != sizeof(res)) {
+            if (errno == EAGAIN || errno == EINTR) return;
+            else {
+                lg(Fatal, "read eventfd failed");
+                throw std::runtime_error("read eventfd failed");
+            }
+        }
+    }
+
+    void Wakeup() {
+        // 唤醒事件循环
+        uint64_t one = 1;
+        // 会触发事件循环的读事件
+        ssize_t n = write(_eventfd, &one, sizeof(one));
+        if (n != sizeof(one)) {
+            lg(Error, "write eventfd failed");
+        }
+    }
+
+    // 判断当前线程是否是事件循环所在的线程
+    bool IsInLoopThread() const { return std::this_thread::get_id() == _tid; }
+    // 压入任务池
+    void QueueInLoop(const callback_t& cb) {
+        {
+            std::lock_guard<std::mutex> lock(_mutex);
+            _pending.push(cb);
+        }
+        Wakeup();
+    }
+    // 执行任务
+    void RunPendingTasks() {
+        std::queue<callback_t> tasks;
+        {
+            std::lock_guard<std::mutex> lock(_mutex);
+            tasks.swap(_pending);
+        }
+        while (!tasks.empty()) {
+            tasks.front()();
+            tasks.pop();
+        }
+    }
+private:
+    int _eventfd;
+    std::thread::id _tid; // 保证线程安全
+    Channel* _eventch;
+    Poller _poller; // 一一对应
+    std::queue<callback_t> _pending;
+    std::mutex _mutex;
+};
+
+void Channel::Update() { _loop->UpdateEvent(this); }
+void Channel::Remove() { _loop->RemoveEvent(this); }
