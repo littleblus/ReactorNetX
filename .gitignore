@@ -2,7 +2,8 @@
 build/
 .vscode/
 raw_html/
-.idea
+.idea/
+log/
 
 # 其他文件
 *.jpg

@@ -9,6 +9,7 @@
 #include <queue>
 #include <mutex>
 #include <thread>
+#include <any>
 
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -234,10 +235,7 @@ class Channel {
 public:
     using callback_t = std::function<void()>;
     Channel(int fd, EventLoop* loop) : _fd(fd), _events(0), _revents(0), _loop(loop) {};
-    ~Channel() {
-        close(_fd);
-        std::cout << "channel deleted: " << _fd << std::endl;
-    }
+    ~Channel() { close(_fd); }
     void SetReadCallback(callback_t cb) { _read_cb = cb; }
     void SetWriteCallback(callback_t cb) { _write_cb = cb; }
     void SetErrorCallback(callback_t cb) { _error_cb = cb; }
@@ -292,13 +290,14 @@ public:
         if ((_revents & EPOLLIN) || (_revents & EPOLLPRI) || (_revents & EPOLLRDHUP)) {
             if (_read_cb) _read_cb();
         }
-        if (_revents & EPOLLOUT) {
-            if (_write_cb) _write_cb();
-        }
+
         if (_revents & EPOLLERR) {
             if (_error_cb) _error_cb();
         }
-        if (_revents & EPOLLHUP) {
+        else if (_revents & EPOLLOUT) {
+            if (_write_cb) _write_cb();
+        }
+        else if (_revents & EPOLLHUP) {
             if (_close_cb) _close_cb(); // 注意其他回调不要close, 否则会重复close
         }
     }
@@ -338,6 +337,7 @@ public:
             throw std::runtime_error("create epoll failed");
         }
     }
+    ~Poller() { close(_epollfd); }
 
     void Update(Channel* ch) {
         if (HasChannel(ch->GetFd())) {
@@ -474,6 +474,7 @@ public:
         _timerch->SetReadCallback(std::bind(&TimerWheel::OnTime, this));
         _timerch->EnableRead();
     }
+    ~TimerWheel() { close(_timerfd); }
 
     // 添加任务, 需要考虑线程安全
     void AddTask(uint64_t id, uint64_t timeout, const TimerTask::TaskFunc& task);
@@ -612,3 +613,35 @@ void TimerWheel::RefreshTask(uint64_t id) {
 void TimerWheel::RemoveTask(uint64_t id) {
     _loop->RunInLoop(std::bind(&TimerWheel::_removeTask, this, id));
 }
+
+enum class ConnectionState {
+    // k通常代表常量或枚举类型
+    kDisconnected,
+    kConnecting,
+    kConnected,
+    kDisconnecting,
+};
+class Connection;
+using PtrConnection = std::shared_ptr<Connection>;
+class Connection {
+public:
+private:
+    uint64_t _id; // 连接的唯一标识
+    int _fd; // 连接的套接字
+    ConnectionState _state; // 连接的状态
+    Socket _sock; // 套接字
+    Channel _channel; // 事件通道
+    Buffer _input; // 输入缓冲区
+    Buffer _output; // 输出缓冲区
+    std::any _context; // 上下文
+
+    using ConnectedCallback = std::function<void(const PtrConnection&)>;
+    using MessageCallback = std::function<void(const PtrConnection&, Buffer*)>;
+    using CloseCallback = std::function<void(const PtrConnection&)>;
+    using EventCallback = std::function<void(const PtrConnection&)>;
+
+    ConnectedCallback _connected_cb;
+    MessageCallback _message_cb;
+    CloseCallback _close_cb;
+    EventCallback _event_cb;
+};

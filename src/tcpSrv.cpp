@@ -1,8 +1,9 @@
 #include "server.hpp"
 
-void HandleClose(Channel* channel) {
+void HandleClose(Channel* channel, EventLoop* loop, uint64_t timerid) {
     std::cout << "Close: " << channel->GetFd() << std::endl;
     channel->Remove();
+    loop->RemoveAfter(timerid);
     // 注意防止重复释放
     delete channel;
 }
@@ -41,10 +42,10 @@ void Accepter(EventLoop* loop, Socket* lst_sock) {
     uint64_t timerid = rand() % 10000;
     channel->SetReadCallback(std::bind(HandleRead, channel));
     channel->SetWriteCallback(std::bind(HandleWrite, channel));
-    channel->SetCloseCallback(std::bind(HandleClose, channel));
+    channel->SetCloseCallback(std::bind(HandleClose, channel, loop, timerid));
     channel->SetErrorCallback(std::bind(HandleError, channel));
     channel->SetEventCallback(std::bind(HandleEvent, loop, timerid));
-    loop->RunAfter(timerid, 10, std::bind(HandleClose, channel));
+    loop->RunAfter(timerid, 10, std::bind(HandleClose, channel, loop, timerid));
     channel->EnableRead();
 }
 
