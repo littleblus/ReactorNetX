@@ -25,19 +25,9 @@ Log lg(Onefile);
 
 class Buffer {
 private:
-    const char* ReadPos() const { return &_buffer[_read_idx]; }
     char* WritePos() { return &_buffer[_write_idx]; }
     std::size_t FrontSize() const { return _read_idx; }
     std::size_t BackSize() const { return _buffer.size() - _write_idx; }
-
-    void MoveReadIdx(std::size_t len) {
-        if (_read_idx + len > _write_idx) throw std::out_of_range("move read idx out of range");
-        _read_idx += len;
-    }
-    void MoveWriteIdx(std::size_t len) {
-        if (len > BackSize()) throw std::out_of_range("move write idx out of range");
-        _write_idx += len;
-    }
 
     void EnsureWritable(std::size_t len) {
         if (len > BackSize()) {
@@ -64,11 +54,21 @@ public:
     explicit Buffer(std::size_t size = 1024) : _buffer(size), _read_idx(0), _write_idx(0) {}
     Buffer(const Buffer& buf) : Buffer() { Write(buf); } // 拷贝构造函数（委托构造）
 
+    const char* ReadPos() const { return &_buffer[_read_idx]; }
     std::size_t ReadableSize() const { return _write_idx - _read_idx; }
     std::size_t WritableSize() const { return BackSize() + FrontSize(); }
 
+    void MoveReadIdx(std::size_t len) {
+        if (_read_idx + len > _write_idx) throw std::out_of_range("move read idx out of range");
+        _read_idx += len;
+    }
+    void MoveWriteIdx(std::size_t len) {
+        if (len > BackSize()) throw std::out_of_range("move write idx out of range");
+        _write_idx += len;
+    }
+
     void Read(void* buf, std::size_t len, bool pop = false) {
-        if (len > ReadableSize()) return;
+        if (len > ReadableSize() || len == 0) return;
         std::copy(ReadPos(), ReadPos() + len, static_cast<char*>(buf));
         if (pop) MoveReadIdx(len);
     }
@@ -84,6 +84,7 @@ public:
         else return "";
     }
     void Write(const void* data, std::size_t len, bool push = true) {
+        if (len == 0) return;
         EnsureWritable(len);
         std::copy(static_cast<const char*>(data), static_cast<const char*>(data) + len, WritePos());
         if (push) MoveWriteIdx(len);
@@ -158,6 +159,7 @@ public:
     }
     // 接收数据
     ssize_t Recv(void* buf, std::size_t len, int flag = 0) {
+        if (len == 0) return 0;
         ssize_t ret = recv(_sockfd, buf, len, flag);
         if (ret == -1) {
             // EAGAIN: 没有数据可读
@@ -169,6 +171,7 @@ public:
     }
     // 发送数据
     ssize_t Send(const void* buf, std::size_t len, int flag = 0) {
+        if (len == 0) return 0;
         ssize_t ret = send(_sockfd, buf, len, flag);
         if (ret == -1) {
             // EAGAIN: 没有数据可写
@@ -520,6 +523,8 @@ public:
         if (IsInLoopThread()) cb();
         else QueueInLoop(cb);
     }
+    // 判断当前线程是否是事件循环所在的线程
+    bool IsInLoopThread() const { return std::this_thread::get_id() == _tid; }
     // 添加事件监控
     void UpdateEvent(Channel* ch) { _poller.Update(ch); }
     // 移除事件监控
@@ -569,8 +574,6 @@ private:
         }
     }
 
-    // 判断当前线程是否是事件循环所在的线程
-    bool IsInLoopThread() const { return std::this_thread::get_id() == _tid; }
     // 压入任务池
     void QueueInLoop(const callback_t& cb) {
         {
@@ -623,17 +626,31 @@ enum class ConnectionState {
 };
 class Connection;
 using PtrConnection = std::shared_ptr<Connection>;
-class Connection {
+class Connection : public std::enable_shared_from_this<Connection> {
 public:
     using ConnectedCallback = std::function<void(const PtrConnection&)>;
     using MessageCallback = std::function<void(const PtrConnection&, Buffer*)>;
     using CloseCallback = std::function<void(const PtrConnection&)>;
     using EventCallback = std::function<void(const PtrConnection&)>;
 
-    Connection();
-    ~Connection();
+    Connection(EventLoop* loop, uint64_t conn_id, int sock_fd)
+        : _id(conn_id)
+        , _fd(sock_fd)
+        , _inactive_release(false)
+        , _loop(loop)
+        , _state(ConnectionState::kConnecting)
+        , _sock(sock_fd)
+        , _channel(sock_fd, loop) {
+        _channel.SetReadCallback(std::bind(&Connection::HandleRead, this));
+        _channel.SetWriteCallback(std::bind(&Connection::HandleWrite, this));
+        _channel.SetCloseCallback(std::bind(&Connection::HandleClose, this));
+        _channel.SetEventCallback(std::bind(&Connection::HandleEvent, this));
+        _channel.SetErrorCallback(std::bind(&Connection::HandleClose, this));
+    }
+
     int GetId() const { return _id; }
     int GetFd() const { return _fd; }
+    bool IsConnected() const { return _state == ConnectionState::kConnected; }
     ConnectionState GetState() const { return _state; }
     std::any* GetContext() { return &_context; }
 
@@ -642,19 +659,151 @@ public:
     void SetCloseCallback(const CloseCallback& cb) { _close_cb = cb; }
     void SetEventCallback(const EventCallback& cb) { _event_cb = cb; }
 
-    void Send(const char* data, size_t len);
-    void Shutdown();
-    void EnableInactivityRelease(int timeout);
-    void DisableInactivityRelease();
+    // 启动连接
+    void Establish() {
+        _loop->RunInLoop(std::bind(&Connection::_establish, this));
+    }
+    // 发送数据
+    void Send(const char* data, size_t len) {
+        _loop->RunInLoop(std::bind(&Connection::_send, this, data, len));
+    }
+    // 关闭连接
+    void Shutdown() {
+        _loop->RunInLoop(std::bind(&Connection::ShutdownInLoop, this));
+    }
+    // 启动非活跃连接超时销毁
+    void EnableInactivityRelease(int timeout) {
+        _loop->RunInLoop(std::bind(&Connection::_enableInactivityRelease, this, timeout));
+    }
+    // 关闭非活跃连接超时销毁
+    void DisableInactivityRelease() {
+        _loop->RunInLoop(std::bind(&Connection::_disableInactivityRelease, this));
+    }
     // 切换协议(重置上下文以及处理函数)
     void Upgrade(const std::any& context, const ConnectedCallback& conn_cb, const MessageCallback& msg_cb
-        , const CloseCallback& close_cb, const EventCallback& event_cb);
-    void SetContext(const std::any& context);
+        , const CloseCallback& close_cb, const EventCallback& event_cb) {
+        if (!_loop->IsInLoopThread()) throw std::runtime_error("upgrade connection in wrong thread");
+        _loop->RunInLoop(std::bind(&Connection::_upgrade, this, context, conn_cb, msg_cb, close_cb, event_cb));
+    }
+    // 重置上下文
+    void SetContext(const std::any& context) { _context = context; }
 private:
-    void HandleRead();
-    void HandleWrite();
-    void HandleClose();
-    void HandleEvent();
+    void HandleRead() {
+        char buf[65536];
+        // MSG_DONTWAIT: 非阻塞
+        ssize_t n = _sock.Recv(buf, sizeof(buf), MSG_DONTWAIT);
+        if (n > 0) {
+            _input.Write(buf, n);
+            if (_input.ReadableSize() > 0) {
+                // 调用消息处理函数
+                if (_message_cb) _message_cb(shared_from_this(), &_input);
+            }
+        }
+        else if (n == 0) {
+            // 表示的是没有读取到数据, 而不是连接断开
+            return;
+        }
+        else {
+            ShutdownInLoop();
+        }
+    }
+    void HandleWrite() {
+        ssize_t n = _sock.Send(_output.ReadPos(), _output.ReadableSize(), MSG_DONTWAIT);
+        if (n > 0) {
+            _output.MoveReadIdx(n);
+            if (_output.ReadableSize() == 0) {
+                _channel.DisableWrite();
+                if (_state == ConnectionState::kDisconnecting) {
+                    CloseInLoop();
+                }
+            }
+        }
+        else if (n == 0) {
+            // 表示的是没有写入数据, 而不是连接断开
+            return;
+        }
+        else {
+            if (_input.ReadableSize() > 0) {
+                if (_message_cb) _message_cb(shared_from_this(), &_input);
+            }
+            CloseInLoop();
+        }
+    }
+    void HandleClose() {
+        // 一旦关闭连接, 那么socket就不能再读写了
+        if (_input.ReadableSize() > 0) {
+            if (_message_cb) _message_cb(shared_from_this(), &_input);
+        }
+        CloseInLoop();
+    }
+    void HandleEvent() {
+        // 刷新连接的活跃度
+        if (_inactive_release) {
+            _loop->RefreshAfter(_id);
+        }
+        if (_event_cb) _event_cb(shared_from_this());
+    }
+
+    void _send(const char* data, size_t len) {
+        if (_state == ConnectionState::kConnected) {
+            _output.Write(data, len);
+            if (!_channel.Writable()) {
+                _channel.EnableWrite();
+            }
+        }
+    }
+    void _enableInactivityRelease(int timeout) {
+        _inactive_release = true;
+        _loop->HasAfter(_id) ?
+            _loop->RefreshAfter(_id) :
+            _loop->RunAfter(_id, timeout, std::bind(&Connection::CloseInLoop, this));
+    }
+    void _disableInactivityRelease() {
+        _inactive_release = false;
+        _loop->RemoveAfter(_id);
+    }
+    void _upgrade(const std::any& context, const ConnectedCallback& conn_cb, const MessageCallback& msg_cb
+        , const CloseCallback& close_cb, const EventCallback& event_cb) {
+        _context = context;
+        _connected_cb = conn_cb;
+        _message_cb = msg_cb;
+        _close_cb = close_cb;
+        _event_cb = event_cb;
+    }
+
+    // 启动时对连接进行初始化
+    void _establish() {
+        if (_state != ConnectionState::kConnecting) throw std::runtime_error("establish connection in wrong state");
+        _state = ConnectionState::kConnected;
+        _channel.EnableRead();
+        if (_connected_cb) _connected_cb(shared_from_this());
+    }
+    // 检测缓冲区是否还有数据
+    void ShutdownInLoop() {
+        _state = ConnectionState::kDisconnecting;
+        if (_input.ReadableSize() > 0) {
+            if (_message_cb) _message_cb(shared_from_this(), &_input);
+        }
+        if (_output.ReadableSize() > 0) {
+            if (!_channel.Writable()) {
+                _channel.EnableWrite();
+            }
+        }
+        else { // 如果没有数据可写, 那么直接关闭连接
+            CloseInLoop();
+        }
+    }
+    // 真正的关闭连接
+    void CloseInLoop() {
+        if (_state == ConnectionState::kDisconnected) return;
+        _state = ConnectionState::kDisconnected;
+        _channel.Remove();
+        _sock.Close();
+        _loop->RemoveAfter(_id);
+        if (_close_cb) _close_cb(shared_from_this());
+        // 移除服务器内部的连接信息
+        if (_server_close_cb) _server_close_cb(shared_from_this());
+    }
 private:
     uint64_t _id; // 连接, 定时器的唯一标识
     int _fd; // 连接的套接字

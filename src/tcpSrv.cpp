@@ -1,10 +1,8 @@
 #include "server.hpp"
 
-void HandleClose(Channel* channel, EventLoop* loop, uint64_t timerid) {
+void HandleClose(Channel* channel) {
     std::cout << "Close: " << channel->GetFd() << std::endl;
     channel->Remove();
-    loop->RemoveAfter(timerid);
-    // 注意防止重复释放
     delete channel;
 }
 
@@ -25,10 +23,6 @@ void HandleWrite(Channel* channel) {
     channel->DisableWrite();
 }
 
-void HandleError(Channel* channel) {
-    lg(Warning, "Error channel: %d", channel->GetFd());
-}
-
 void HandleEvent(EventLoop* loop, uint64_t timerid) {
     loop->RefreshAfter(timerid);
 }
@@ -40,12 +34,12 @@ void Accepter(EventLoop* loop, Socket* lst_sock) {
     // 为新连接设置回调函数
     Channel* channel = new Channel(newfd, loop);
     uint64_t timerid = rand() % 10000;
-    channel->SetReadCallback(std::bind(HandleRead, channel));
-    channel->SetWriteCallback(std::bind(HandleWrite, channel));
-    channel->SetCloseCallback(std::bind(HandleClose, channel, loop, timerid));
-    channel->SetErrorCallback(std::bind(HandleError, channel));
-    channel->SetEventCallback(std::bind(HandleEvent, loop, timerid));
-    loop->RunAfter(timerid, 10, std::bind(HandleClose, channel, loop, timerid));
+    Connection* conn = new Connection(loop, timerid, newfd);
+    conn->SetMessageCallback(std::bind(HandleRead, channel));
+    conn->SetCloseCallback(std::bind(HandleClose, channel));
+    conn->SetConnectedCallback();
+    conn->SetEventCallback();
+    loop->RunAfter(timerid, 10, std::bind(HandleClose, channel));
     channel->EnableRead();
 }
 
