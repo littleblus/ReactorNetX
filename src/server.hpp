@@ -824,3 +824,38 @@ private:
     CloseCallback _server_close_cb; // 从管理端关闭连接
     EventCallback _event_cb;
 };
+
+class Accepter {
+public:
+    // 接收连接的回调函数, 参数为新连接的套接字
+    using AcceptCallback = std::function<void(int)>;
+    Accepter(EventLoop* loop, uint16_t port, const AcceptCallback& cb = nullptr)
+        : _sock(CreateServer(port))
+        , _loop(loop)
+        , _channel(_sock.GetFd(), loop)
+        , _accept_cb(cb) {
+        _channel.SetReadCallback(std::bind(&Accepter::HandleRead, this));
+    }
+    void SetAcceptCallback(const AcceptCallback& cb) { _accept_cb = cb; }
+    void Listen() { _channel.EnableRead(); }
+private:
+    int CreateServer(uint16_t port) {
+        if (!_sock.CreateServer(port, false)) {
+            lg(Fatal, "create server failed, port: %d", port);
+            throw std::runtime_error("create server failed");
+        }
+        return _sock.GetFd();
+    }
+
+    void HandleRead() {
+        int newfd = _sock.Accept();
+        if (newfd != -1) {
+            if (_accept_cb) _accept_cb(newfd);
+        }
+    }
+private:
+    Socket _sock; // 监听套接字
+    EventLoop* _loop; // 对监听套接字进行监控
+    Channel _channel; // 事件通道
+    AcceptCallback _accept_cb; // 接收连接的回调函数
+};

@@ -1,6 +1,7 @@
 #include "server.hpp"
 
 std::unordered_map<uint64_t, PtrConnection> g_conns;
+EventLoop loop;
 
 void ConnectionDestroy(const PtrConnection& conn) {
     g_conns.erase(conn->GetId());
@@ -21,13 +22,9 @@ void OnMessage(const PtrConnection& conn, Buffer* buffer) {
 
 uint64_t conn_id = 1;
 
-void Accepter(EventLoop* loop, Socket* lst_sock) {
-    int fd = lst_sock->GetFd();
-    int newfd = accept(fd, NULL, NULL);
-    if (newfd < 0) return;
+void NewConnection(int fd) {
     // 为新连接设置回调函数
-    Channel* channel = new Channel(newfd, loop);
-    PtrConnection conn(new Connection(loop, conn_id, newfd));
+    PtrConnection conn(new Connection(&loop, conn_id, fd));
     conn->SetMessageCallback(std::bind(OnMessage, std::placeholders::_1, std::placeholders::_2));
     conn->SetCloseCallback(std::bind(ConnectionDestroy, std::placeholders::_1));
     conn->SetConnectedCallback(std::bind(OnConnected, std::placeholders::_1));
@@ -37,13 +34,8 @@ void Accepter(EventLoop* loop, Socket* lst_sock) {
 }
 
 int main() {
-    EventLoop loop;
-    Socket lst_sock;
-    lst_sock.CreateServer(8888);
-    // 为监听套接字设置回调函数
-    Channel channel(lst_sock.GetFd(), &loop);
-    channel.SetReadCallback(std::bind(Accepter, &loop, &lst_sock));
-    channel.EnableRead();
+    Accepter accepter(&loop, 8888, std::bind(NewConnection, std::placeholders::_1));
+    accepter.Listen();
     for (;;) {
         loop.Start();
     }
