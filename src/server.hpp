@@ -10,6 +10,7 @@
 #include <mutex>
 #include <thread>
 #include <any>
+#include <condition_variable>
 
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -541,15 +542,17 @@ public:
     bool HasAfter(uint64_t id) const { return _timerWheel.HasTask(id); }
 
     void Start() {
-        // 事件监控
-        std::vector<Channel*> _active;
-        _poller.Poll(_active);
-        // 事件处理
-        for (auto& ch : _active) {
-            ch->HandleEvent();
+        for (;;) {
+            // 事件监控
+            std::vector<Channel*> _active;
+            _poller.Poll(_active);
+            // 事件处理
+            for (auto& ch : _active) {
+                ch->HandleEvent();
+            }
+            // 执行任务
+            RunPendingTasks();
         }
-        // 执行任务
-        RunPendingTasks();
     }
 private:
     void ReadEventfd() {
@@ -616,6 +619,20 @@ void TimerWheel::RefreshTask(uint64_t id) {
 void TimerWheel::RemoveTask(uint64_t id) {
     _loop->RunInLoop(std::bind(&TimerWheel::_removeTask, this, id));
 }
+
+class LoopThread {
+public:
+    LoopThread();
+    // 返回当前线程关联的Loop指针
+    EventLoop* GetLoop() { return _loop; }
+private:
+    void ThreadEntry();
+
+    std::thread _thread; // EventLoop所在的线程
+    EventLoop* _loop; // 事件循环(线程内实例化)
+    std::mutex _mutex; // 保证线程安全
+    std::condition_variable _cond; // 保证线程安全
+};
 
 enum class ConnectionState {
     // k通常代表常量或枚举类型
