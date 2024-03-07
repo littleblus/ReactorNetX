@@ -645,7 +645,7 @@ public:
         _channel.SetWriteCallback(std::bind(&Connection::HandleWrite, this));
         _channel.SetCloseCallback(std::bind(&Connection::HandleClose, this));
         _channel.SetEventCallback(std::bind(&Connection::HandleEvent, this));
-        _channel.SetErrorCallback(std::bind(&Connection::HandleClose, this));
+        // _channel.SetErrorCallback(std::bind(&Connection::HandleClose, this));
     }
 
     int GetId() const { return _id; }
@@ -665,7 +665,9 @@ public:
     }
     // 发送数据
     void Send(const char* data, size_t len) {
-        _loop->RunInLoop(std::bind(&Connection::_send, this, data, len));
+        Buffer buf;
+        buf.Write(data, len);
+        _loop->RunInLoop(std::bind(&Connection::_send, this, buf));
     }
     // 关闭连接
     void Shutdown() {
@@ -744,9 +746,9 @@ private:
         if (_event_cb) _event_cb(shared_from_this());
     }
 
-    void _send(const char* data, size_t len) {
+    void _send(const Buffer buf) {
         if (_state == ConnectionState::kConnected) {
-            _output.Write(data, len);
+            _output.Write(buf);
             if (!_channel.Writable()) {
                 _channel.EnableWrite();
             }
