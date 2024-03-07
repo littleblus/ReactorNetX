@@ -625,9 +625,41 @@ class Connection;
 using PtrConnection = std::shared_ptr<Connection>;
 class Connection {
 public:
+    using ConnectedCallback = std::function<void(const PtrConnection&)>;
+    using MessageCallback = std::function<void(const PtrConnection&, Buffer*)>;
+    using CloseCallback = std::function<void(const PtrConnection&)>;
+    using EventCallback = std::function<void(const PtrConnection&)>;
+
+    Connection();
+    ~Connection();
+    int GetId() const { return _id; }
+    int GetFd() const { return _fd; }
+    ConnectionState GetState() const { return _state; }
+    std::any* GetContext() { return &_context; }
+
+    void SetConnectedCallback(const ConnectedCallback& cb) { _connected_cb = cb; }
+    void SetMessageCallback(const MessageCallback& cb) { _message_cb = cb; }
+    void SetCloseCallback(const CloseCallback& cb) { _close_cb = cb; }
+    void SetEventCallback(const EventCallback& cb) { _event_cb = cb; }
+
+    void Send(const char* data, size_t len);
+    void Shutdown();
+    void EnableInactivityRelease(int timeout);
+    void DisableInactivityRelease();
+    // 切换协议(重置上下文以及处理函数)
+    void Upgrade(const std::any& context, const ConnectedCallback& conn_cb, const MessageCallback& msg_cb
+        , const CloseCallback& close_cb, const EventCallback& event_cb);
+    void SetContext(const std::any& context);
 private:
-    uint64_t _id; // 连接的唯一标识
+    void HandleRead();
+    void HandleWrite();
+    void HandleClose();
+    void HandleEvent();
+private:
+    uint64_t _id; // 连接, 定时器的唯一标识
     int _fd; // 连接的套接字
+    bool _inactive_release; // 是否是因为超时而关闭
+    EventLoop* _loop; // 事件循环
     ConnectionState _state; // 连接的状态
     Socket _sock; // 套接字
     Channel _channel; // 事件通道
@@ -635,13 +667,9 @@ private:
     Buffer _output; // 输出缓冲区
     std::any _context; // 上下文
 
-    using ConnectedCallback = std::function<void(const PtrConnection&)>;
-    using MessageCallback = std::function<void(const PtrConnection&, Buffer*)>;
-    using CloseCallback = std::function<void(const PtrConnection&)>;
-    using EventCallback = std::function<void(const PtrConnection&)>;
-
     ConnectedCallback _connected_cb;
     MessageCallback _message_cb;
     CloseCallback _close_cb;
+    CloseCallback _server_close_cb; // 从管理端关闭连接
     EventCallback _event_cb;
 };
