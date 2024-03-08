@@ -1,7 +1,8 @@
 #include "server.hpp"
 
 std::unordered_map<uint64_t, PtrConnection> g_conns;
-EventLoop loop;
+std::vector<LoopThread> threads(2);
+EventLoop base_loop;
 
 void ConnectionDestroy(const PtrConnection& conn) {
     g_conns.erase(conn->GetId());
@@ -21,10 +22,13 @@ void OnMessage(const PtrConnection& conn, Buffer* buffer) {
 }
 
 uint64_t conn_id = 1;
+int next_loop = 0;
 
 void NewConnection(int fd) {
     // 为新连接设置回调函数
-    PtrConnection conn(new Connection(&loop, conn_id, fd));
+    next_loop = (next_loop + 1) % threads.size();
+    auto loop = threads[next_loop].GetLoop();
+    PtrConnection conn(new Connection(loop, conn_id, fd));
     conn->SetMessageCallback(std::bind(OnMessage, std::placeholders::_1, std::placeholders::_2));
     conn->SetCloseCallback(std::bind(ConnectionDestroy, std::placeholders::_1));
     conn->SetConnectedCallback(std::bind(OnConnected, std::placeholders::_1));
@@ -34,10 +38,10 @@ void NewConnection(int fd) {
 }
 
 int main() {
-    Accepter accepter(&loop, 8888, std::bind(NewConnection, std::placeholders::_1));
+    Accepter accepter(&base_loop, 8888, std::bind(NewConnection, std::placeholders::_1));
     accepter.Listen();
     for (;;) {
-        loop.Start();
+        base_loop.Start();
     }
 
     return 0;

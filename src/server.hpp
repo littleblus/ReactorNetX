@@ -622,11 +622,27 @@ void TimerWheel::RemoveTask(uint64_t id) {
 
 class LoopThread {
 public:
-    LoopThread();
+    LoopThread() : _thread(std::thread(std::bind(&LoopThread::ThreadEntry, this))), _loop(nullptr) {}
     // 返回当前线程关联的Loop指针
-    EventLoop* GetLoop() { return _loop; }
+    EventLoop* GetLoop() {
+        EventLoop* loop = nullptr;
+        {
+            std::unique_lock<std::mutex> lock(_mutex);
+            _cond.wait(lock, [this]() { return _loop != nullptr; });
+            loop = _loop;
+        }
+        return loop;
+    }
 private:
-    void ThreadEntry();
+    void ThreadEntry() {
+        EventLoop loop;
+        {
+            std::lock_guard<std::mutex> lock(_mutex);
+            _loop = &loop;
+            _cond.notify_all();
+        }
+        loop.Start();
+    }
 
     std::thread _thread; // EventLoop所在的线程
     EventLoop* _loop; // 事件循环(线程内实例化)
