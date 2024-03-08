@@ -650,6 +650,35 @@ private:
     std::condition_variable _cond; // 保证线程安全
 };
 
+class LoopThreadPool {
+public:
+    LoopThreadPool(EventLoop* baseLoop, int num = 0) : _threadNum(num), _next(0), _baseLoop(baseLoop) {}
+
+    void Create() {
+        for (int i = 0; i < _threadNum; i++) {
+            LoopThread* loopThread = new LoopThread;
+            _threads.push_back(loopThread);
+            _loops.push_back(loopThread->GetLoop());
+        }
+    }
+
+    EventLoop* GetNextLoop() {
+        if (_threadNum == 0) {
+            return _baseLoop;
+        }
+        else {
+            _next = (_next + 1) % _threadNum;
+            return _loops[_next];
+        }
+    }
+private:
+    int _threadNum; // 线程数量
+    int _next; // 下一个线程
+    EventLoop* _baseLoop; // 主事件循环
+    std::vector<LoopThread*> _threads; // 线程池
+    std::vector<EventLoop*> _loops; // 事件循环池
+};
+
 enum class ConnectionState {
     // k通常代表常量或枚举类型
     kDisconnected,
