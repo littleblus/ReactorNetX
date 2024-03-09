@@ -21,6 +21,7 @@
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
 #include <sys/timerfd.h>
+#include <signal.h>
 
 Log lg(Onefile);
 
@@ -239,7 +240,7 @@ class Channel {
 public:
     using callback_t = std::function<void()>;
     Channel(int fd, EventLoop* loop) : _fd(fd), _events(0), _revents(0), _loop(loop) {};
-    ~Channel() { close(_fd); }
+
     void SetReadCallback(callback_t cb) { _read_cb = cb; }
     void SetWriteCallback(callback_t cb) { _write_cb = cb; }
     void SetErrorCallback(callback_t cb) { _error_cb = cb; }
@@ -327,8 +328,7 @@ private:
         ev.events = ch->GetEvents();
         int ret = epoll_ctl(_epollfd, op, fd, &ev);
         if (ret == -1) {
-            lg(Error, "epoll op failed");
-            throw std::runtime_error("epoll op failed");
+            lg(Error, "epoll op failed: %s", strerror(errno));
         }
     }
     bool HasChannel(int fd) const { return _channels.find(fd) != _channels.end(); }
@@ -923,7 +923,12 @@ private:
     AcceptCallback _accept_cb; // 接收连接的回调函数
 };
 
-class TcpServer {
+class NetWork {
+public:
+    NetWork() { signal(SIGPIPE, SIG_IGN); }
+};
+
+class TcpServer : private NetWork {
 public:
     using ConnectedCallback = std::function<void(const PtrConnection&)>;
     using MessageCallback = std::function<void(const PtrConnection&, Buffer*)>;
