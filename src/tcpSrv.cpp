@@ -1,11 +1,6 @@
 #include "server.hpp"
 
-std::unordered_map<uint64_t, PtrConnection> g_conns;
-EventLoop base_loop;
-LoopThreadPool* loop_pool;
-
 void ConnectionDestroy(const PtrConnection& conn) {
-    g_conns.erase(conn->GetId());
     std::cout << "Disconnected: " << conn->GetId() << std::endl;
 }
 
@@ -18,28 +13,15 @@ void OnMessage(const PtrConnection& conn, Buffer* buffer) {
     std::cout << "Received: " << msg << std::endl;
     std::string rsp = "Hello, " + msg;
     conn->Send(rsp.data(), rsp.size());
-    //conn->Shutdown();
-}
-
-uint64_t conn_id = 1;
-
-void NewConnection(int fd) {
-    // 为新连接设置回调函数
-    PtrConnection conn(new Connection(loop_pool->GetNextLoop(), conn_id, fd));
-    conn->SetMessageCallback(std::bind(OnMessage, std::placeholders::_1, std::placeholders::_2));
-    conn->SetCloseCallback(std::bind(ConnectionDestroy, std::placeholders::_1));
-    conn->SetConnectedCallback(std::bind(OnConnected, std::placeholders::_1));
-    conn->EnableInactivityRelease(10);
-    conn->Establish();
-    g_conns[conn_id++] = conn;
 }
 
 int main() {
-    loop_pool = new LoopThreadPool(&base_loop, 2);
-    loop_pool->Create();
-    Accepter accepter(&base_loop, 8888, std::bind(NewConnection, std::placeholders::_1));
-    accepter.Listen();
-    base_loop.Start();
+    TcpServer srv(8888, 2);
+    srv.EnableInactivityRelease(10);
+    srv.SetCloseCallback(ConnectionDestroy);
+    srv.SetConnectedCallback(OnConnected);
+    srv.SetMessageCallback(OnMessage);
+    srv.Start();
 
     return 0;
 }

@@ -954,7 +954,7 @@ public:
     void Start() { _baseloop.Start(); }
     void RunAfter(uint64_t timeout, const TimerTask::TaskFunc& task) {
         _next_id++;
-        _baseloop;
+        _baseloop.RunInLoop(std::bind(&TcpServer::_runAfter, this, _next_id, timeout, task));
     }
 private:
     // 为新连接创建Connection对象
@@ -966,11 +966,16 @@ private:
         conn->SetConnectedCallback(_connected_cb);
         conn->SetEventCallback(_event_cb);
         conn->SetServerCloseCallback(std::bind(&TcpServer::RemoveConnection, this, std::placeholders::_1));
-        conn->EnableInactivityRelease(10);
+        if (_inactivity_release) conn->EnableInactivityRelease(_timeout);
         conn->Establish();
-        
+        _connections[_next_id] = conn;
     }
-    void RemoveConnection(uint64_t conn_id);
+    void RemoveConnection(const PtrConnection& conn) {
+        _baseloop.RunInLoop(std::bind(&TcpServer::_removeConnection, this, conn));
+    }
+    void _removeConnection(const PtrConnection& conn) {
+        _connections.erase(conn->GetId());
+    }
 
     void _runAfter(uint64_t id, uint64_t timeout, const TimerTask::TaskFunc& task) {
         _baseloop.RunAfter(id, timeout, task);
