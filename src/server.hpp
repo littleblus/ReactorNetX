@@ -720,6 +720,7 @@ public:
     void SetMessageCallback(const MessageCallback& cb) { _message_cb = cb; }
     void SetCloseCallback(const CloseCallback& cb) { _close_cb = cb; }
     void SetEventCallback(const EventCallback& cb) { _event_cb = cb; }
+    void SetServerCloseCallback(const CloseCallback& cb) { _server_close_cb = cb; }
 
     // 启动连接
     void Establish() {
@@ -920,4 +921,72 @@ private:
     EventLoop* _loop; // 对监听套接字进行监控
     Channel _channel; // 事件通道
     AcceptCallback _accept_cb; // 接收连接的回调函数
+};
+
+class TcpServer {
+public:
+    using ConnectedCallback = std::function<void(const PtrConnection&)>;
+    using MessageCallback = std::function<void(const PtrConnection&, Buffer*)>;
+    using CloseCallback = std::function<void(const PtrConnection&)>;
+    using EventCallback = std::function<void(const PtrConnection&)>;
+
+    TcpServer(int port, int thread_num = 0)
+        : _next_id(0)
+        , _port(port)
+        , _timeout(0)
+        , _inactivity_release(false)
+        , _accepter(&_baseloop, port, std::bind(&TcpServer::NewConnection, this, std::placeholders::_1))
+        , _threadpool(&_baseloop, thread_num) {
+        _threadpool.Create();
+        _accepter.Listen();
+    }
+
+    void SetConnectedCallback(const ConnectedCallback& cb) { _connected_cb = cb; }
+    void SetMessageCallback(const MessageCallback& cb) { _message_cb = cb; }
+    void SetCloseCallback(const CloseCallback& cb) { _close_cb = cb; }
+    void SetEventCallback(const EventCallback& cb) { _event_cb = cb; }
+
+    void EnableInactivityRelease(int timeout) {
+        _inactivity_release = true;
+        _timeout = timeout;
+    }
+    void DisableInactivityRelease() { _inactivity_release = false; }
+    void Start() { _baseloop.Start(); }
+    void RunAfter(uint64_t timeout, const TimerTask::TaskFunc& task) {
+        _next_id++;
+        _baseloop;
+    }
+private:
+    // 为新连接创建Connection对象
+    void NewConnection(int newfd) {
+        _next_id++;
+        PtrConnection conn(new Connection(_threadpool.GetNextLoop(), _next_id, newfd));
+        conn->SetMessageCallback(_message_cb);
+        conn->SetCloseCallback(_close_cb);
+        conn->SetConnectedCallback(_connected_cb);
+        conn->SetEventCallback(_event_cb);
+        conn->SetServerCloseCallback(std::bind(&TcpServer::RemoveConnection, this, std::placeholders::_1));
+        conn->EnableInactivityRelease(10);
+        conn->Establish();
+        
+    }
+    void RemoveConnection(uint64_t conn_id);
+
+    void _runAfter(uint64_t id, uint64_t timeout, const TimerTask::TaskFunc& task) {
+        _baseloop.RunAfter(id, timeout, task);
+    }
+private:
+    uint64_t _next_id;
+    int _port;
+    int _timeout;
+    bool _inactivity_release;
+    EventLoop _baseloop;
+    Accepter _accepter;
+    LoopThreadPool _threadpool; // 从属线程池
+    std::unordered_map<uint64_t, PtrConnection> _connections;
+
+    ConnectedCallback _connected_cb;
+    MessageCallback _message_cb;
+    CloseCallback _close_cb;
+    EventCallback _event_cb;
 };
