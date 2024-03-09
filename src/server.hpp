@@ -1,6 +1,7 @@
 #pragma once
 
 #include "log.hpp"
+#include <utility>
 #include <vector>
 #include <stdexcept>
 #include <functional>
@@ -241,11 +242,11 @@ public:
     using callback_t = std::function<void()>;
     Channel(int fd, EventLoop* loop) : _fd(fd), _events(0), _revents(0), _loop(loop) {};
 
-    void SetReadCallback(callback_t cb) { _read_cb = cb; }
-    void SetWriteCallback(callback_t cb) { _write_cb = cb; }
-    void SetErrorCallback(callback_t cb) { _error_cb = cb; }
-    void SetCloseCallback(callback_t cb) { _close_cb = cb; }
-    void SetEventCallback(callback_t cb) { _event_cb = cb; }
+    void SetReadCallback(callback_t cb) { _read_cb = std::move(cb); }
+    void SetWriteCallback(callback_t cb) { _write_cb = std::move(cb); }
+    void SetErrorCallback(callback_t cb) { _error_cb = std::move(cb); }
+    void SetCloseCallback(callback_t cb) { _close_cb = std::move(cb); }
+    void SetEventCallback(callback_t cb) { _event_cb = std::move(cb); }
     void SetRevents(int revents) { _revents = revents; }
 
     int GetFd() const { return _fd; }
@@ -395,13 +396,12 @@ public:
     using TaskFunc = std::function<void()>;
     using ReleaseFunc = std::function<void()>;
 
-    TimerTask(uint64_t id, uint64_t timeout, const TaskFunc& task) : _id(id), _timeout(timeout), _task(task) {}
+    TimerTask(uint64_t timeout, TaskFunc task) : _timeout(timeout), _task(std::move(task)) {}
     void SetRelease(const ReleaseFunc& release) { _release = release; }
     void Cancel() { _canceled = true; }
     uint64_t Timeout() const { return _timeout; }
     ~TimerTask() { if (!_canceled) _task(); _release(); }
 private:
-    uint64_t _id; // 任务对象的唯一标识
     uint64_t _timeout; // 任务的超时时间
     TaskFunc _task; // 任务的回调函数
     ReleaseFunc _release; // 任务的释放函数(释放TimerWheel中的任务对象)
@@ -432,7 +432,7 @@ private:
         Tick();
     }
     void _addTask(uint64_t id, uint64_t timeout, const TimerTask::TaskFunc& task) {
-        TaskPtr pt(new TimerTask(id, timeout, task));
+        TaskPtr pt(new TimerTask(timeout, task));
         pt->SetRelease([this, id]() {
             _taskMap.erase(id);
             });
