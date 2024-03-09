@@ -121,7 +121,7 @@ public:
     }
     // 绑定地址
     bool Bind(const std::string& ip, uint16_t port) {
-        struct sockaddr_in addr;
+        struct sockaddr_in addr{};
         addr.sin_family = AF_INET;
         addr.sin_port = htons(port);
         addr.sin_addr.s_addr = inet_addr(ip.c_str());
@@ -142,7 +142,7 @@ public:
     }
     // 客户发起连接
     bool Connect(const std::string& ip, uint16_t port) {
-        struct sockaddr_in addr;
+        struct sockaddr_in addr{};
         addr.sin_family = AF_INET;
         addr.sin_port = htons(port);
         addr.sin_addr.s_addr = inet_addr(ip.c_str());
@@ -195,7 +195,7 @@ public:
         if (!Create()) return false;
         if (!Bind(ip, port)) return false;
         if (!Listen(backlog)) return false;
-        if (block == false) NonBlock();
+        if (!block) NonBlock();
         ReuseAddr();
         return true;
     }
@@ -323,7 +323,7 @@ class Poller {
 private:
     void EpollOp(int op, Channel* ch) {
         int fd = ch->GetFd();
-        struct epoll_event ev;
+        struct epoll_event ev{};
         ev.data.fd = fd;
         ev.events = ch->GetEvents();
         int ret = epoll_ctl(_epollfd, op, fd, &ev);
@@ -456,7 +456,7 @@ private:
         }
     }
 public:
-    TimerWheel(EventLoop* loop)
+    explicit TimerWheel(EventLoop* loop)
         : _tick(0)
         , _wheelSize(60)
         , _timerfd(timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC))
@@ -468,14 +468,14 @@ public:
             lg(Fatal, "create timerfd failed");
             throw std::runtime_error("create timerfd failed");
         }
-        struct itimerspec ts;
+        struct itimerspec ts{};
         ts.it_interval.tv_sec = 1;
         ts.it_interval.tv_nsec = 0;
         ts.it_value.tv_sec = 1;
         ts.it_value.tv_nsec = 0;
         timerfd_settime(_timerfd, 0, &ts, nullptr);
         // 创建定时器事件
-        _timerch->SetReadCallback(std::bind(&TimerWheel::OnTime, this));
+        _timerch->SetReadCallback([this] { OnTime(); });
         _timerch->EnableRead();
     }
     ~TimerWheel() { close(_timerfd); }
@@ -511,7 +511,7 @@ public:
             lg(Fatal, "create eventfd failed");
             throw std::runtime_error("create eventfd failed");
         }
-        _eventch->SetReadCallback(std::bind(&EventLoop::ReadEventfd, this));
+        _eventch->SetReadCallback([this] { ReadEventfd(); });
         _eventch->EnableRead();
     }
     ~EventLoop() {
@@ -611,18 +611,18 @@ void Channel::Update() { _loop->UpdateEvent(this); }
 void Channel::Remove() { _loop->RemoveEvent(this); }
 
 void TimerWheel::AddTask(uint64_t id, uint64_t timeout, const TimerTask::TaskFunc& task) {
-    _loop->RunInLoop(std::bind(&TimerWheel::_addTask, this, id, timeout, task));
+    _loop->RunInLoop([this, id, timeout, task] { _addTask(id, timeout, task); });
 }
 void TimerWheel::RefreshTask(uint64_t id) {
-    _loop->RunInLoop(std::bind(&TimerWheel::_refreshTask, this, id));
+    _loop->RunInLoop([this, id] { _refreshTask(id); });
 }
 void TimerWheel::RemoveTask(uint64_t id) {
-    _loop->RunInLoop(std::bind(&TimerWheel::_removeTask, this, id));
+    _loop->RunInLoop([this, id] { _removeTask(id); });
 }
 
 class LoopThread {
 public:
-    LoopThread() : _thread(std::thread(std::bind(&LoopThread::ThreadEntry, this))), _loop(nullptr) {}
+    LoopThread() : _thread(std::thread([this] { ThreadEntry(); })), _loop(nullptr) {}
     // 返回当前线程关联的Loop指针
     EventLoop* GetLoop() {
         EventLoop* loop = nullptr;
@@ -652,11 +652,11 @@ private:
 
 class LoopThreadPool {
 public:
-    LoopThreadPool(EventLoop* baseLoop, int num = 0) : _threadNum(num), _next(0), _baseLoop(baseLoop) {}
+    explicit LoopThreadPool(EventLoop* baseLoop, int num = 0) : _threadNum(num), _next(0), _baseLoop(baseLoop) {}
 
     void Create() {
         for (int i = 0; i < _threadNum; i++) {
-            LoopThread* loopThread = new LoopThread;
+            auto* loopThread = new LoopThread;
             _threads.push_back(loopThread);
             _loops.push_back(loopThread->GetLoop());
         }
@@ -703,14 +703,14 @@ public:
         , _state(ConnectionState::kConnecting)
         , _sock(sock_fd)
         , _channel(sock_fd, loop) {
-        _channel.SetReadCallback(std::bind(&Connection::HandleRead, this));
-        _channel.SetWriteCallback(std::bind(&Connection::HandleWrite, this));
-        _channel.SetCloseCallback(std::bind(&Connection::HandleClose, this));
-        _channel.SetEventCallback(std::bind(&Connection::HandleEvent, this));
+        _channel.SetReadCallback([this] { HandleRead(); });
+        _channel.SetWriteCallback([this] { HandleWrite(); });
+        _channel.SetCloseCallback([this] { HandleClose(); });
+        _channel.SetEventCallback([this] { HandleEvent(); });
         // _channel.SetErrorCallback(std::bind(&Connection::HandleClose, this));
     }
 
-    int GetId() const { return _id; }
+    uint64_t GetId() const { return _id; }
     int GetFd() const { return _fd; }
     bool IsConnected() const { return _state == ConnectionState::kConnected; }
     ConnectionState GetState() const { return _state; }
@@ -724,31 +724,31 @@ public:
 
     // 启动连接
     void Establish() {
-        _loop->RunInLoop(std::bind(&Connection::_establish, this));
+        _loop->RunInLoop([this] { _establish(); });
     }
     // 发送数据
     void Send(const char* data, size_t len) {
         Buffer buf;
         buf.Write(data, len);
-        _loop->RunInLoop(std::bind(&Connection::_send, this, buf));
+        _loop->RunInLoop([this, buf] { _send(buf); });
     }
     // 关闭连接
     void Shutdown() {
-        _loop->RunInLoop(std::bind(&Connection::ShutdownInLoop, this));
+        _loop->RunInLoop([this] { ShutdownInLoop(); });
     }
     // 启动非活跃连接超时销毁
     void EnableInactivityRelease(int timeout) {
-        _loop->RunInLoop(std::bind(&Connection::_enableInactivityRelease, this, timeout));
+        _loop->RunInLoop([this, timeout] { _enableInactivityRelease(timeout); });
     }
     // 关闭非活跃连接超时销毁
     void DisableInactivityRelease() {
-        _loop->RunInLoop(std::bind(&Connection::_disableInactivityRelease, this));
+        _loop->RunInLoop([this] { _disableInactivityRelease(); });
     }
     // 切换协议(重置上下文以及处理函数)
     void Upgrade(const std::any& context, const ConnectedCallback& conn_cb, const MessageCallback& msg_cb
         , const CloseCallback& close_cb, const EventCallback& event_cb) {
         if (!_loop->IsInLoopThread()) throw std::runtime_error("upgrade connection in wrong thread");
-        _loop->RunInLoop(std::bind(&Connection::_upgrade, this, context, conn_cb, msg_cb, close_cb, event_cb));
+        _loop->RunInLoop([this, context, conn_cb, msg_cb, close_cb, event_cb] { _upgrade(context, conn_cb, msg_cb, close_cb, event_cb); });
     }
     // 重置上下文
     void SetContext(const std::any& context) { _context = context; }
@@ -821,7 +821,7 @@ private:
         _inactive_release = true;
         _loop->HasAfter(_id) ?
             _loop->RefreshAfter(_id) :
-            _loop->RunAfter(_id, timeout, std::bind(&Connection::CloseInLoop, this));
+            _loop->RunAfter(_id, timeout, [this] { CloseInLoop(); });
     }
     void _disableInactivityRelease() {
         _inactive_release = false;
@@ -892,12 +892,11 @@ class Accepter {
 public:
     // 接收连接的回调函数, 参数为新连接的套接字
     using AcceptCallback = std::function<void(int)>;
-    Accepter(EventLoop* loop, uint16_t port, const AcceptCallback& cb = nullptr)
+    Accepter(EventLoop* loop, uint16_t port, AcceptCallback cb = nullptr)
         : _sock(CreateServer(port))
-        , _loop(loop)
         , _channel(_sock.GetFd(), loop)
-        , _accept_cb(cb) {
-        _channel.SetReadCallback(std::bind(&Accepter::HandleRead, this));
+        , _accept_cb(std::move(cb)) {
+        _channel.SetReadCallback([this] { HandleRead(); });
     }
     void SetAcceptCallback(const AcceptCallback& cb) { _accept_cb = cb; }
     void Listen() { _channel.EnableRead(); }
@@ -918,7 +917,6 @@ private:
     }
 private:
     Socket _sock; // 监听套接字
-    EventLoop* _loop; // 对监听套接字进行监控
     Channel _channel; // 事件通道
     AcceptCallback _accept_cb; // 接收连接的回调函数
 };
@@ -935,12 +933,11 @@ public:
     using CloseCallback = std::function<void(const PtrConnection&)>;
     using EventCallback = std::function<void(const PtrConnection&)>;
 
-    TcpServer(int port, int thread_num = 0)
+    explicit TcpServer(int port, int thread_num = 0)
         : _next_id(0)
-        , _port(port)
         , _timeout(0)
         , _inactivity_release(false)
-        , _accepter(&_baseloop, port, std::bind(&TcpServer::NewConnection, this, std::placeholders::_1))
+        , _accepter(&_baseloop, port, [this](auto && PH1) { NewConnection(std::forward<decltype(PH1)>(PH1)); })
         , _threadpool(&_baseloop, thread_num) {
         _threadpool.Create();
         _accepter.Listen();
@@ -959,7 +956,7 @@ public:
     void Start() { _baseloop.Start(); }
     void RunAfter(uint64_t timeout, const TimerTask::TaskFunc& task) {
         _next_id++;
-        _baseloop.RunInLoop(std::bind(&TcpServer::_runAfter, this, _next_id, timeout, task));
+        _baseloop.RunInLoop([this, timeout, task] { _runAfter(_next_id, timeout, task); });
     }
 private:
     // 为新连接创建Connection对象
@@ -970,13 +967,13 @@ private:
         conn->SetCloseCallback(_close_cb);
         conn->SetConnectedCallback(_connected_cb);
         conn->SetEventCallback(_event_cb);
-        conn->SetServerCloseCallback(std::bind(&TcpServer::RemoveConnection, this, std::placeholders::_1));
+        conn->SetServerCloseCallback([this](auto && PH1) { RemoveConnection(std::forward<decltype(PH1)>(PH1)); });
         if (_inactivity_release) conn->EnableInactivityRelease(_timeout);
         conn->Establish();
         _connections[_next_id] = conn;
     }
     void RemoveConnection(const PtrConnection& conn) {
-        _baseloop.RunInLoop(std::bind(&TcpServer::_removeConnection, this, conn));
+        _baseloop.RunInLoop([this, conn] { _removeConnection(conn); });
     }
     void _removeConnection(const PtrConnection& conn) {
         _connections.erase(conn->GetId());
@@ -987,7 +984,6 @@ private:
     }
 private:
     uint64_t _next_id;
-    int _port;
     int _timeout;
     bool _inactivity_release;
     EventLoop _baseloop;

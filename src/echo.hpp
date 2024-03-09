@@ -20,7 +20,7 @@ public:
     EchoServer(int port, int threadNum = 0)
         : _server(port, threadNum) {
         // _server.SetConnectedCallback(std::bind(&EchoServer::OnConnected, this, std::placeholders::_1));
-        _server.SetMessageCallback(std::bind(&EchoServer::OnMessage, this, std::placeholders::_1, std::placeholders::_2));
+        _server.SetMessageCallback([this](auto && PH1, auto && PH2) { OnMessage(std::forward<decltype(PH1)>(PH1), std::forward<decltype(PH2)>(PH2)); });
         // _server.SetCloseCallback(std::bind(&EchoServer::ConnectionDestroy, this, std::placeholders::_1));
     }
     void Start() { _server.Start(); }
