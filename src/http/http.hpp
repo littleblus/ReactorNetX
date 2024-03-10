@@ -4,6 +4,8 @@
 #include <sys/stat.h>
 #include <regex>
 
+const int kMaxHttpLineSize = 8192;
+
 namespace Util {
     // 分割字符串
     std::vector<std::string> Split(const std::string& str, const std::string& delim) {
@@ -243,7 +245,7 @@ public:
     void Clear() {
         _method.clear();
         _path.clear();
-        _version.clear();
+        _version = "HTTP/1.1";
         _body.clear();
         _headers.clear();
         _params.clear();
@@ -290,12 +292,13 @@ public:
     bool IsKeepAlive() const {
         return HasHeader("Connection") && GetHeader("Connection") == "keep-alive";
     }
-private:
+
     std::string _method;
     std::string _path;
-    std::string _version;
+    std::string _version = "HTTP/1.1";
     std::string _body;
     std::smatch _matches;
+private:
     std::unordered_map<std::string, std::string> _headers; // 头部字段
     std::unordered_map<std::string, std::string> _params; // URL参数
 };
@@ -337,10 +340,342 @@ public:
     bool IsKeepAlive() const {
         return HasHeader("Connection") && GetHeader("Connection") == "keep-alive";
     }
-private:
     int _status_code;
     bool _redirect;
     std::string _redirect_url;
     std::string _body;
     std::unordered_map<std::string, std::string> _headers; // 头部字段
+};
+
+enum class HttpRecvState {
+    kRECV_HTTP_LINE,
+    kRECV_HTTP_HEAD,
+    kRECV_HTTP_BODY,
+    kRECV_HTTP_DONE,
+    kRECV_HTTP_ERROR
+};
+
+class HttpContext {
+public:
+    HttpContext() : _resp_state(200), _recv_state(HttpRecvState::kRECV_HTTP_LINE) {}
+    int GetRespState() const { return _resp_state; }
+    HttpRecvState GetRecvState() const { return _recv_state; }
+    HttpRequest& GetRequest() { return _request; }
+    // 接受并解析HTTP请求
+    void RecvHttpRequest(Buffer* buf) {
+        switch (_recv_state) {
+        case HttpRecvState::kRECV_HTTP_LINE:
+            RecvHttpLine(buf);
+        case HttpRecvState::kRECV_HTTP_HEAD:
+            RecvHttpHead(buf);
+        case HttpRecvState::kRECV_HTTP_BODY:
+            RecvHttpBody(buf);
+        }
+    }
+    void Clear() {
+        _resp_state = 200;
+        _recv_state = HttpRecvState::kRECV_HTTP_LINE;
+        _request.Clear();
+    }
+private:
+    bool RecvHttpLine(Buffer* buf) {
+        if (_recv_state != HttpRecvState::kRECV_HTTP_LINE) {
+            return false;
+        }
+        auto line = buf->ReadLine();
+        // 缓冲区中没有完整的一行
+        if (line.empty()) {
+            if (buf->ReadableSize() > kMaxHttpLineSize) {
+                _recv_state = HttpRecvState::kRECV_HTTP_ERROR;
+                _resp_state = 414; // URI Too Long
+                return false;
+            }
+            return true;
+        }
+        // 解析HTTP请求行
+        if (line.size() > kMaxHttpLineSize) {
+            _recv_state = HttpRecvState::kRECV_HTTP_ERROR;
+            _resp_state = 414;
+            return false;
+        }
+        if (parseHttpLine(line)) {
+            buf->MoveReadIdx(line.size());
+            _recv_state = HttpRecvState::kRECV_HTTP_HEAD;
+            return true;
+        }
+        else {
+            return false;
+        }
+    }
+    bool RecvHttpHead(Buffer* buf) {
+        if (_recv_state != HttpRecvState::kRECV_HTTP_HEAD) {
+            return false;
+        }
+        // 一行一行读, 直到遇到空行
+        for (;;) {
+            auto line = buf->ReadLine();
+            // 缓冲区中没有完整的一行
+            if (line.empty()) {
+                if (buf->ReadableSize() > kMaxHttpLineSize) {
+                    _recv_state = HttpRecvState::kRECV_HTTP_ERROR;
+                    _resp_state = 414; // URI Too Long
+                    return false;
+                }
+                return true;
+            }
+            // 解析HTTP请求行
+            if (line.size() > kMaxHttpLineSize) {
+                _recv_state = HttpRecvState::kRECV_HTTP_ERROR;
+                _resp_state = 414;
+                return false;
+            }
+            if (line == "\n" || line == "\r\n") {
+                buf->MoveReadIdx(line.size());
+                break;
+            }
+            if (parseHttpHead(line)) {
+                buf->MoveReadIdx(line.size());
+            }
+            else {
+                return false;
+            }
+        }
+        _recv_state = HttpRecvState::kRECV_HTTP_BODY;
+        return true;
+    }
+    bool RecvHttpBody(Buffer* buf) {
+        if (_recv_state != HttpRecvState::kRECV_HTTP_BODY) {
+            return false;
+        }
+        // 读取Content-Length长度的数据
+        size_t content_length = _request.GetContentLength();
+        if (content_length == 0) {
+            _recv_state = HttpRecvState::kRECV_HTTP_DONE;
+            return true;
+        }
+        // 缓冲区中没有足够的数据
+        size_t need_size = content_length - _request._body.size();
+        if (buf->ReadableSize() < need_size) {
+            _request._body += buf->ReadAsString(buf->ReadableSize(), true);
+            return true;
+        }
+        else {
+            _request._body += buf->ReadAsString(need_size, true);
+            _recv_state = HttpRecvState::kRECV_HTTP_DONE;
+            return true;
+        }
+    }
+    bool parseHttpLine(const std::string& line) {
+        std::smatch matches;
+        std::regex e("(GET|POST|PUT|DELETE|HEAD|OPTIONS|TRACE|CONNECT) ([^?]*)(?:\\?(.*))? (HTTP/1\\.[01])(?:\n|\r\n)", std::regex::icase);
+        // GET www.baidu.com/login?username=123&password=456 HTTP/1.1
+        // 1 : GET
+        // 2 : www.baidu.com/login
+        // 3 : username=123&password=456
+        // 4 : HTTP/1.1
+        if (std::regex_match(line, matches, e)) {
+            _request._method = matches[1];
+            // 转换成大写
+            std::transform(_request._method.begin(), _request._method.end(), _request._method.begin(), ::toupper);
+            _request._path = Util::UrlDecode(matches[2], false);
+            _request._version = matches[4];
+            // key=value&key=value
+            auto queries = Util::Split(matches[3], "&");
+            for (const auto& query : queries) {
+                auto pos = query.find('=');
+                if (pos != std::string::npos) {
+                    std::string k = Util::UrlDecode(query.substr(0, pos), true);
+                    std::string v = Util::UrlDecode(query.substr(pos + 1), true);
+                    _request.SetParam(k, v);
+                }
+                else {
+                    _recv_state = HttpRecvState::kRECV_HTTP_ERROR;
+                    _resp_state = 400; // Bad Request
+                    return false;
+                }
+            }
+            return true;
+        }
+        else {
+            _recv_state = HttpRecvState::kRECV_HTTP_ERROR;
+            _resp_state = 400; // Bad Request
+            return false;
+        }
+    }
+    bool parseHttpHead(const std::string& head) {
+        // key: value\r\n
+        auto pos = head.find(": ");
+        if (pos != std::string::npos) {
+            std::string k = head.substr(0, pos);
+            std::string v = head.substr(pos + 2);
+            _request.SetHeader(k, v);
+            return true;
+        }
+        else {
+            _recv_state = HttpRecvState::kRECV_HTTP_ERROR;
+            _resp_state = 400; // Bad Request
+            return false;
+        }
+    }
+private:
+    int _resp_state;
+    HttpRecvState _recv_state;
+    HttpRequest _request;
+};
+
+class HttpServer {
+public:
+    using Handler = std::function<void(const HttpRequest&, HttpResponse&)>;
+    using Handlers = std::vector<std::pair<std::regex, Handler>>;
+    HttpServer(int port, int _thread_num, int timeout = 30) : _server(port, _thread_num) {
+        _server.SetConnectedCallback([this](auto && PH1) { OnConnected(std::forward<decltype(PH1)>(PH1)); });
+        _server.SetMessageCallback([this](auto && PH1, auto && PH2) { OnMessage(std::forward<decltype(PH1)>(PH1), std::forward<decltype(PH2)>(PH2)); });
+        _server.EnableInactivityRelease(timeout);
+    }
+    // 设置静态资源根目录
+    void SetRoot(const std::string& root) { _root = root; }
+    // 添加GET处理函数
+    void Get(const std::string& pattern, const Handler& handler) {
+        _get_handlers.emplace_back(std::regex(pattern), handler);
+    }
+    // 添加POST处理函数
+    void Post(const std::string& pattern, const Handler& handler) {
+        _post_handlers.emplace_back(std::regex(pattern), handler);
+    }
+    // 添加PUT处理函数
+    void Put(const std::string& pattern, const Handler& handler) {
+        _put_handlers.emplace_back(std::regex(pattern), handler);
+    }
+    // 添加DELETE处理函数
+    void Delete(const std::string& pattern, const Handler& handler) {
+        _delete_handlers.emplace_back(std::regex(pattern), handler);
+    }
+    void Start() { _server.Start(); }
+private:
+    void WriteResponse(const PtrConnection& conn, const HttpRequest& req, HttpResponse& resp) {
+        if (req.IsKeepAlive()) {
+            resp.SetHeader("Connection", "keep-alive");
+        }
+        else {
+            resp.SetHeader("Connection", "close");
+        }
+        if (!resp._body.empty() && !resp.HasHeader("Content-Length")) {
+            resp.SetHeader("Content-Length", std::to_string(resp._body.size()));
+        }
+        if (!resp._body.empty() && !resp.HasHeader("Content-Type")) {
+            resp.SetHeader("Content-Type", "application/octet-stream");
+        }
+        if (resp._redirect) {
+            resp.SetHeader("Location", resp._redirect_url);
+        }
+        std::string response = req._version + " " + std::to_string(resp._status_code) + " " + Util::StatusCodeDescription(resp._status_code) + "\r\n";
+        for (auto& [key, value] : resp._headers) {
+            response += key;
+            response += ": ";
+            response += value;
+            response += "\r\n";
+        }
+        response += "\r\n";
+        response += resp._body;
+        conn->Send(response.c_str(), response.size());
+    }
+    bool IsFileRequest(const HttpRequest& req) {
+        if (_root.empty()) return false;
+        if (req._method != "GET" && req._method != "HEAD") return false;
+        if (!Util::ResourcePathValid(req._path)) return false;
+        // 如果请求的末尾是一个/, 则默认请求index.html
+        std::string path = _root + req._path;
+        if (req._path.back() == '/') {
+            path += "/index.html";
+        }
+        if (!Util::IsRegularFile(path)) return false;
+        return true;
+    }
+    bool FileHandler(HttpRequest& req, HttpResponse& resp) {
+        req._path = _root + req._path + (req._path.back() == '/' ? "index.html" : "");
+        if (Util::ReadFile(req._path, resp._body)){
+            auto mime = Util::GetMimeType(req._path);
+            resp.SetHeader("Content-Type", mime);
+            resp.SetHeader("Content-Length", std::to_string(resp._body.size()));
+            return true;
+        }
+        else {
+            resp._status_code = 404; // Not Found
+            return false;
+        }
+    }
+    void ErrorHandler(HttpResponse& resp) {
+        std::string body = "<html><head><title>Error</title></head><body><h1>";
+        body += std::to_string(resp._status_code) + " " + Util::StatusCodeDescription(resp._status_code);
+        body += "</h1></body></html>";
+        resp.SetContent(body, "text/html");
+    }
+    void Dispatch(HttpRequest& req, HttpResponse& resp, Handlers& handlers) {
+        for (auto& [key, func] : handlers) {
+            if (std::regex_match(req._path, req._matches, key)) {
+                func(req, resp);
+            }
+        }
+        resp._status_code = 404; // Not Found
+    }
+    void Route(HttpRequest& req, HttpResponse& resp) {
+        if (IsFileRequest(req)) {
+            if (!FileHandler(req, resp)) {
+                ErrorHandler(resp);
+            }
+            return;
+        }
+        if (req._method == "GET" || req._method == "HEAD") {
+            Dispatch(req, resp, _get_handlers);
+        }
+        else if (req._method == "POST") {
+            Dispatch(req, resp, _post_handlers);
+        }
+        else if (req._method == "PUT") {
+            Dispatch(req, resp, _put_handlers);
+        }
+        else if (req._method == "DELETE") {
+            Dispatch(req, resp, _delete_handlers);
+        }
+        else {
+            resp._status_code = 405; // Method Not Allowed
+            ErrorHandler(resp);
+        }
+    }
+    void OnConnected(const PtrConnection& conn) {
+        conn->SetContext(HttpContext());
+    }
+    void OnMessage(const PtrConnection& conn, Buffer* buf) {
+        while (buf->ReadableSize() > 0) {
+            auto context = any_cast<HttpContext>(conn->GetContext());
+            context->RecvHttpRequest(buf);
+            HttpRequest &req = context->GetRequest();
+            HttpResponse resp;
+            if (context->GetRespState() >= 400) {
+                ErrorHandler(resp);
+                WriteResponse(conn, req, resp);
+                conn->Shutdown();
+                return;
+            }
+            if (context->GetRecvState() != HttpRecvState::kRECV_HTTP_DONE) {
+                // 当前请求还未接收完整, 继续等待
+                return;
+            }
+            // 路由查找+处理
+            Route(req, resp);
+            WriteResponse(conn, req, resp);
+            context->Clear();
+            if (!resp.IsKeepAlive()) {
+                conn->Shutdown();
+                return;
+            }
+        }
+    }
+private:
+    Handlers _get_handlers;
+    Handlers _post_handlers;
+    Handlers _put_handlers;
+    Handlers _delete_handlers;
+    std::string _root; // 静态资源根目录
+    TcpServer _server;
 };
