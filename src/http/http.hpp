@@ -298,7 +298,6 @@ public:
     std::string _version = "HTTP/1.1";
     std::string _body;
     std::smatch _matches;
-private:
     std::unordered_map<std::string, std::string> _headers; // 头部字段
     std::unordered_map<std::string, std::string> _params; // URL参数
 };
@@ -533,7 +532,12 @@ public:
         _server.EnableInactivityRelease(timeout);
     }
     // 设置静态资源根目录
-    void SetRoot(const std::string& root) { _root = root; }
+    bool SetRoot(std::string root) {
+        if (root.back() != '/') root += "/";
+        if (!Util::IsDirectory(root)) return false;
+        _root = root;
+        return true;
+    }
     // 添加GET处理函数
     void Get(const std::string& pattern, const Handler& handler) {
         _get_handlers.emplace_back(std::regex(pattern), handler);
