@@ -2,6 +2,7 @@
 #include "../server.hpp"
 #include <fstream>
 #include <sys/stat.h>
+#include <regex>
 
 namespace Util {
     // 分割字符串
@@ -236,3 +237,110 @@ namespace Util {
         return true;
     }
 }
+
+class HttpRequest {
+public:
+    void Clear() {
+        _method.clear();
+        _path.clear();
+        _version.clear();
+        _body.clear();
+        _headers.clear();
+        _params.clear();
+        std::smatch match;
+        _matches.swap(match);
+    }
+    // 插入头部字段
+    void SetHeader(const std::string& key, const std::string& value) {
+        _headers[key] = value;
+    }
+    // 是否存在指定的头部字段
+    bool HasHeader(const std::string& key) const {
+        return _headers.find(key) != _headers.end();
+    }
+    // 获取指定头部字段的值
+    std::string GetHeader(const std::string& key) const {
+        auto it = _headers.find(key);
+        if (it != _headers.end()) {
+            return it->second;
+        }
+        return "";
+    }
+    // 插入URL参数
+    void SetParam(const std::string& key, const std::string& value) {
+        _params[key] = value;
+    }
+    // 是否存在指定的URL参数
+    bool HasParam(const std::string& key) const {
+        return _params.find(key) != _params.end();
+    }
+    // 获取指定URL参数的值
+    std::string GetParam(const std::string& key) const {
+        auto it = _params.find(key);
+        if (it != _params.end()) {
+            return it->second;
+        }
+        return "";
+    }
+    // 获取正文长度
+    size_t GetContentLength() const {
+        return HasHeader("Content-Length") ? std::stoul(GetHeader("Content-Length")) : 0;
+    }
+    // 是否是短连接
+    bool IsKeepAlive() const {
+        return HasHeader("Connection") && GetHeader("Connection") == "keep-alive";
+    }
+private:
+    std::string _method;
+    std::string _path;
+    std::string _version;
+    std::string _body;
+    std::smatch _matches;
+    std::unordered_map<std::string, std::string> _headers; // 头部字段
+    std::unordered_map<std::string, std::string> _params; // URL参数
+};
+
+class HttpResponse {
+public:
+    explicit HttpResponse(int status_code = 200) : _status_code(status_code), _redirect(false) {}
+
+    void Clear() {
+        _status_code = 200;
+        _redirect = false;
+        _redirect_url.clear();
+        _body.clear();
+        _headers.clear();
+    }
+    void SetHeader(const std::string& key, const std::string& value) {
+        _headers[key] = value;
+    }
+    bool HasHeader(const std::string& key) const {
+        return _headers.find(key) != _headers.end();
+    }
+    std::string GetHeader(const std::string& key) const {
+        auto it = _headers.find(key);
+        if (it != _headers.end()) {
+            return it->second;
+        }
+        return "";
+    }
+    void SetContent(const std::string& body, const std::string& mime_type = "text/plain") {
+        _body = body;
+        SetHeader("Content-Type", mime_type);
+        SetHeader("Content-Length", std::to_string(_body.size()));
+    }
+    void SetRedirect(const std::string& url, int status_code = 302) {
+        _redirect = true;
+        _redirect_url = url;
+        _status_code = status_code;
+    }
+    bool IsKeepAlive() const {
+        return HasHeader("Connection") && GetHeader("Connection") == "keep-alive";
+    }
+private:
+    int _status_code;
+    bool _redirect;
+    std::string _redirect_url;
+    std::string _body;
+    std::unordered_map<std::string, std::string> _headers; // 头部字段
+};
