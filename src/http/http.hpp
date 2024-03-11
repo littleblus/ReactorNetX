@@ -651,7 +651,7 @@ private:
     }
     void OnMessage(const PtrConnection& conn, Buffer* buf) {
         while (buf->ReadableSize() > 0) {
-            auto context = any_cast<HttpContext>(conn->GetContext());
+            auto context = std::any_cast<HttpContext>(conn->GetContext());
             context->RecvHttpRequest(buf);
             HttpRequest &req = context->GetRequest();
             HttpResponse resp;

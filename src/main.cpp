@@ -1,16 +1,11 @@
 #include "http/http.hpp"
 
 int main() {
-    HttpServer server(8888, 3);
-    if (!server.SetRoot("../wwwroot")) {
+    HttpServer server(8888, 3, 10);
+    if (!server.SetRoot("wwwroot/")) {
         std::cerr << "SetRoot failed" << std::endl;
         return 1;
     }
-    server.Get("/hello", [](const HttpRequest& req, HttpResponse& resp) {
-        std::string s;
-        s += "<html><head><title>hello</title></head><body><h1>hello</h1></body></html>";
-        resp.SetContent(s, "text/html");
-    });
     auto echo = [](const HttpRequest& req, HttpResponse& resp) {
         std::string s;
         s += req._method + " " + req._path + " " + req._version + "\r\n";
@@ -23,10 +18,13 @@ int main() {
         s += "\r\n";
         s += req._body;
         resp.SetContent(s, "text/plain");
-    };
-    server.Post("/login", echo);
-    server.Put("/1234.txt", echo);
-    server.Delete("/1234.txt", echo);
+        };
+    // server.Get("/hello", [](const HttpRequest& req, HttpResponse& resp) {
+    //     std::string s;
+    //     s += "<html><head><title>hello</title></head><body><h1>hello</h1></body></html>";
+    //     resp.SetContent(s, "text/html");
+    // });
+    server.Get("/hello", echo);
     server.Start();
 
     return 0;
