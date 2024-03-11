@@ -507,6 +507,8 @@ private:
         if (pos != std::string::npos) {
             std::string k = head.substr(0, pos);
             std::string v = head.substr(pos + 2);
+            if (v.back() == '\n') v.pop_back();
+            if (v.back() == '\r') v.pop_back();
             _request.SetHeader(k, v);
             return true;
         }
@@ -618,6 +620,7 @@ private:
         for (auto& [key, func] : handlers) {
             if (std::regex_match(req._path, req._matches, key)) {
                 func(req, resp);
+                return;
             }
         }
         resp._status_code = 404; // Not Found
