@@ -2,7 +2,7 @@
 
 int main() {
     HttpServer server(8888, 3, 10);
-    if (!server.SetRoot("wwwroot/")) {
+    if (!server.SetRoot("../wwwroot/")) {
         std::cerr << "SetRoot failed" << std::endl;
         return 1;
     }

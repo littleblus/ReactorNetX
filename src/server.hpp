@@ -730,7 +730,7 @@ public:
     void Send(const char* data, size_t len) {
         Buffer buf;
         buf.Write(data, len);
-        _loop->RunInLoop([this, buf] { _send(buf); });
+        _loop->RunInLoop([this, buf] { _send(std::move(buf)); });
     }
     // 关闭连接
     void Shutdown() {
@@ -809,7 +809,7 @@ private:
         if (_event_cb) _event_cb(shared_from_this());
     }
 
-    void _send(const Buffer buf) {
+    void _send(const Buffer& buf) {
         if (_state == ConnectionState::kConnected) {
             _output.Write(buf);
             if (!_channel.Writable()) {

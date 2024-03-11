@@ -99,7 +99,7 @@ namespace Util {
     }
     // 响应状态码的描述
     std::string StatusCodeDescription(int code) {
-        std::unordered_map<int, std::string> status_code_description = {
+        static std::unordered_map<int, std::string> status_code_description = {
             {100, "Continue"},
             {101, "Switching Protocols"},
             {200, "OK"},
@@ -150,7 +150,7 @@ namespace Util {
     }
     // 获取文件的MIME类型
     std::string GetMimeType(const std::string& file) {
-        std::unordered_map<std::string, std::string> mime_types = {
+        static std::unordered_map<std::string, std::string> mime_types = {
                 {".html", "text/html"},
                 {".css", "text/css"},
                 {".js", "application/javascript"},
@@ -661,6 +661,8 @@ private:
             if (context->GetRespState() >= 400) {
                 ErrorHandler(resp);
                 WriteResponse(conn, req, resp);
+                context->Clear(); // 清空上下文, 否则会一直返回错误
+                buf->Clear(); // 清空缓冲区
                 conn->Shutdown();
                 return;
             }
