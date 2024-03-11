@@ -292,7 +292,6 @@ public:
         // EPOLLERR: 错误
         // EPOLLHUP: 对端关闭
         // EPOLLRDHUP: 对端关闭连接
-        if (_event_cb) _event_cb(); // 注意次序
         if ((_revents & EPOLLIN) || (_revents & EPOLLPRI) || (_revents & EPOLLRDHUP)) {
             if (_read_cb) _read_cb();
         }
@@ -306,6 +305,7 @@ public:
         else if (_revents & EPOLLHUP) {
             if (_close_cb) _close_cb(); // 注意其他回调不要close, 否则会重复close
         }
+        if (_event_cb) _event_cb();
     }
 private:
     int _fd;
@@ -429,7 +429,9 @@ private:
                 throw std::runtime_error("read timerfd failed");
             }
         }
-        Tick();
+        while (res--) {
+            Tick();
+        }
     }
     void _addTask(uint64_t id, uint64_t timeout, const TimerTask::TaskFunc& task) {
         TaskPtr pt(new TimerTask(timeout, task));
@@ -524,6 +526,14 @@ public:
         if (IsInLoopThread()) cb();
         else QueueInLoop(cb);
     }
+    // 压入任务池
+    void QueueInLoop(const callback_t& cb) {
+        {
+            std::lock_guard<std::mutex> lock(_mutex);
+            _pending.push(cb);
+        }
+        Wakeup();
+    }
     // 判断当前线程是否是事件循环所在的线程
     bool IsInLoopThread() const { return std::this_thread::get_id() == _tid; }
     // 添加事件监控
@@ -577,14 +587,6 @@ private:
         }
     }
 
-    // 压入任务池
-    void QueueInLoop(const callback_t& cb) {
-        {
-            std::lock_guard<std::mutex> lock(_mutex);
-            _pending.push(cb);
-        }
-        Wakeup();
-    }
     // 执行任务
     void RunPendingTasks() {
         std::queue<callback_t> tasks;
@@ -779,7 +781,7 @@ private:
             if (_output.ReadableSize() == 0) {
                 _channel.DisableWrite();
                 if (_state == ConnectionState::kDisconnecting) {
-                    CloseInLoop();
+                    Close();
                 }
             }
         }
@@ -791,7 +793,7 @@ private:
             if (_input.ReadableSize() > 0) {
                 if (_message_cb) _message_cb(shared_from_this(), &_input);
             }
-            CloseInLoop();
+            Close();
         }
     }
     void HandleClose() {
@@ -799,7 +801,7 @@ private:
         if (_input.ReadableSize() > 0) {
             if (_message_cb) _message_cb(shared_from_this(), &_input);
         }
-        CloseInLoop();
+        Close();
     }
     void HandleEvent() {
         // 刷新连接的活跃度
@@ -821,7 +823,7 @@ private:
         _inactive_release = true;
         _loop->HasAfter(_id) ?
             _loop->RefreshAfter(_id) :
-            _loop->RunAfter(_id, timeout, [this] { CloseInLoop(); });
+            _loop->RunAfter(_id, timeout, [this] { Close(); });
     }
     void _disableInactivityRelease() {
         _inactive_release = false;
@@ -855,8 +857,12 @@ private:
             }
         }
         else { // 如果没有数据可写, 那么直接关闭连接
-            CloseInLoop();
+            Close();
         }
+    }
+    void Close() {
+        // 必须等待事件循环中的任务执行完毕, 才能关闭连接, 否则会出现段错误
+        _loop->QueueInLoop([this]{ CloseInLoop(); });
     }
     // 真正的关闭连接
     void CloseInLoop() {

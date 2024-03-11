@@ -18,6 +18,7 @@ int main() {
         s += "\r\n";
         s += req._body;
         resp.SetContent(s, "text/plain");
+        sleep(15);
         };
     // server.Get("/hello", [](const HttpRequest& req, HttpResponse& resp) {
     //     std::string s;
