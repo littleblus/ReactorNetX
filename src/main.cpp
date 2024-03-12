@@ -1,8 +1,15 @@
 #include "http/http.hpp"
 
+const std::string WWWROOT = "../wwwroot/";
+
+void PutFile(const HttpRequest& req, HttpResponse& resp) {
+    std::string pathname = WWWROOT + req._path;
+    Util::WriteFile(pathname, req._body);
+}
+
 int main() {
-    HttpServer server(8888, 3, 10);
-    if (!server.SetRoot("../wwwroot/")) {
+    HttpServer server(8888, 20, 30);
+    if (!server.SetRoot(WWWROOT)) {
         std::cerr << "SetRoot failed" << std::endl;
         return 1;
     }
@@ -19,11 +26,6 @@ int main() {
         s += req._body;
         resp.SetContent(s, "text/plain");
         };
-    // server.Get("/hello", [](const HttpRequest& req, HttpResponse& resp) {
-    //     std::string s;
-    //     s += "<html><head><title>hello</title></head><body><h1>hello</h1></body></html>";
-    //     resp.SetContent(s, "text/html");
-    // });
     server.Get("/hello", echo);
     server.Start();
 
